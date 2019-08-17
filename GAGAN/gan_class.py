@@ -1,7 +1,5 @@
-import tensorflow as tf
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 import copy
 import random
 import torch
@@ -14,51 +12,10 @@ import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from numpy.random import randint
 import itertools
-###################################################################################################
-# ######## Auxiliary Functions
-###################################################################################################
-
-
-# def plot(samples, theshape):
-#     fig = plt.figure(figsize=(5, 5))
-#     gs = gridspec.GridSpec(5, 5)
-#     gs.update(wspace=0.05, hspace=0.05)
-#
-#     for i, sample in enumerate(samples[:25, :]):
-#         ax = plt.subplot(gs[i])
-#         plt.axis('off')
-#         ax.set_xticklabels([])
-#         ax.set_yticklabels([])
-#         ax.set_aspect('equal')
-#         plt.imshow(sample.reshape(theshape))
-#
-#     return fig
-#
-#
-# def next_random_batch(num, data):
-#     """
-#     Return a total of `num` random samples and labels.
-#     """
-#     idx = np.arange(0, len(data))
-#     np.random.shuffle(idx)
-#     idx = idx[:num]
-#     data_shuffle = data[idx, :]
-#     return data_shuffle
-#
-#
-# def next_batch(num, data, start):
-#     """
-#     Return a total of 'num' samples and labels.
-#     """
-#     idx = np.arange(start, np.min([start+num, len(data)]))
-#     return data[idx, :]
-#
-#
-# def xavier_init(shape):
-#     in_dim = shape[0]
-#     xavier_stddev = 1. / tf.sqrt(in_dim / 2.)
-#
-#     return tf.random_normal(shape=shape, stddev=tf.cast(xavier_stddev, "float32"))
+from util.ConvLayer import Conv2dSame
+from metrics.fid import fid_score
+from util import tools
+from metrics import generative_score
 
 ###############################################################################################################################
 # ########################################################## Network Descriptor #######################################################################################################################################################################################
@@ -73,11 +30,19 @@ class NetworkDescriptor:
         self.number_loop_train = number_loop_train
         self.init_functions = init_functions
         self.list_act_functions = list_act_functions
-        self.nz = 100
         self.ngf = output_dim
         self.ndf = output_dim
         self.nc = input_dim
         self.lossfunction = lossfunction
+
+        #constants
+        self.nz = 100
+        self.same_conv_pos = {5: [0, 0, 0, 0, 0],
+                     6: [0, 1, 0, 0, 0, 0],
+                     7: [0, 1, 0, 1, 0, 0, 0],
+                     8: [0, 1, 0, 1, 0, 1, 0, 0],
+                     9: [0, 1, 0, 1, 0, 1, 0, 1, 0],
+                     10: [0, 1, 1, 0, 1, 0, 1, 0, 1, 0]}
 
     def copy_from_other_network(self, other_network):
         self.number_layers = other_network.number_layers
@@ -209,6 +174,8 @@ class Generator(nn.Module):
         self.activationG = g_descriptor.list_act_functions
         self.nolayers = g_descriptor.number_layers
         self.opChannels = g_descriptor.list_ouput_channels
+        self.same_conv_pos = g_descriptor.same_conv_pos
+
 
         ip = g_descriptor.nz
         i = 0
@@ -219,12 +186,14 @@ class Generator(nn.Module):
         # Create model based on genome
         while i < (self.nolayers-1):
 
+            # Set convtraspose and batch norm layers
             if i == 0:
                 model += [nn.ConvTranspose2d(ip, op, 4, 1, 0, bias=False),
                           nn.BatchNorm2d(op)]
+            elif (self.same_conv_pos[self.nolayers][i]):
+                model += [nn.ConvTranspose2d(ip, op, 3, 1, 1, bias=False),
+                          nn.BatchNorm2d(op)]
             else:
-
-                # Add two strides if layers is not the first one
                 model += [nn.ConvTranspose2d(ip, op, 4, 2, 1, bias=False),
                           nn.BatchNorm2d(op)]
 
@@ -261,14 +230,19 @@ class Discriminator(nn.Module):
 
         self.nolayers = d_descriptor.number_layers
         self.opChannels = d_descriptor.list_ouput_channels
-
+        self.same_conv2d_pos = d_descriptor.same_conv_pos
         ip = d_descriptor.nc
         op = d_descriptor.ndf
         i = 0
         model = []
 
         while i < (self.nolayers-1):
-            model += [nn.Conv2d(ip, op, 4, 2, 1, bias=False)]
+
+            if self.same_conv2d_pos[self.nolayers][i] == 1:
+                # Add conv2d_same layers !
+                model += [Conv2dSame(ip, op, (4, 4), 1)]
+            else:
+                model += [nn.Conv2d(ip, op, 4, 2, 1)]
 
             # Normalization is only added if the layer is not the input layer
             if i > 0:
@@ -282,9 +256,10 @@ class Discriminator(nn.Module):
                 model += [nn.ELU(inplace=True)]
 
             ip = op
-            op = self.opChannels[i]
-
             i = i+1
+            if i < self.nolayers:
+                op = self.opChannels[i]
+
 
         model += [nn.Conv2d(ip, 1, 4, 1, 0, bias=False)]
 
@@ -320,11 +295,35 @@ class GAN:
     # custom weights initialization called on netG and netD
     def weights_init(self,m):
         classname = m.__class__.__name__
-        if classname.find('Conv') != -1:
+        if hasattr(m, 'weight') and classname.find('Conv') != -1:
             nn.init.normal_(m.weight.data, 0.0, 0.02)
         elif classname.find('BatchNorm') != -1:
             nn.init.normal_(m.weight.data, 1.0, 0.02)
             nn.init.constant_(m.bias.data, 0)
+
+
+
+    def getFIDScore(self):
+
+
+        #INIT INCEPTION MODEL ONLY ONCE(!)
+
+        # Get FID score for the model:
+        base_fid_statistics, inception_model = generative_score.initialize_fid(self.dataloader, sample_size=1000)
+
+        noise = torch.randn(1000, 100, 1, 1, device=self.device)
+
+        self.Gen_network.eval()
+        generated_images = self.Gen_network(noise).detach()
+        inception_model = tools.cuda(inception_model)
+        m1, s1 = fid_score.calculate_activation_statistics(
+            generated_images.data.cpu().numpy(), inception_model, cuda=tools.is_cuda_available(),
+            dims=2048)
+        inception_model.cpu()
+        m2, s2 = base_fid_statistics
+        ret = fid_score.calculate_frechet_distance(m1, s1, m2, s2)
+        self.Gen_network.zero_grad()
+        return ret
 
     def train_gan(self):
 
@@ -345,11 +344,16 @@ class GAN:
         #######################
         # ADD DIFFERENT WEIGHTS INIT
         self.Gen_network.apply(self.weights_init)
+
         self.Disc_network.apply(self.weights_init)
 
 
         # ADD DIFFERENT LOSS FUCNTIONS
-        criterion = torch.nn.BCELoss()
+
+        if self.loss_function ==0:
+            criterion = torch.nn.BCELoss()
+        elif (self.loss_function == 2 or 3):
+            BCE_stable = torch.nn.BCEWithLogitsLoss()
 
         # Create batch of latent vectors that we will use to visualize
         #  the progression of the generator
@@ -384,23 +388,27 @@ class GAN:
                 # Format batch
                 real_cpu = data[0].to(self.device)
 
-                print(real_cpu.size())
-
                 b_size = real_cpu.size(0)
                 label = torch.full((b_size,), real_label, device=self.device)
                 f_label = torch.full((b_size,), fake_label, device=self.device)
                 # Forward pass real batch through D
-                output = self.Disc_network(real_cpu).view(-1)
+                y_pred = self.Disc_network(real_cpu).view(-1)
+
+
                 # Calculate loss on all-real batch
-
-                print(output.size())
-                print(label.size())
-
-                # BCE loss
-                errD_real = criterion(output, label)
-                # Calculate gradients for D in backward pass
-                errD_real.backward()
-                D_x = output.mean().item()
+                if self.loss_function == 0:
+                    # BCE loss
+                    errD_real = criterion(y_pred, label)
+                    errD_real.backward()
+                elif self.loss_function ==1:
+                    # MSE loss
+                    errD_real = torch.mean((y_pred - label) ** 2)
+                    errD_real.backward()
+                elif self.loss_function == 4:
+                    #Hinge loss
+                    errD_real = torch.mean(torch.nn.ReLU()(1.0 - y_pred))
+                    errD_real.backward()
+                D_x = y_pred.mean().item()
 
                 ## Train with all-fake batch
                 # Generate batch of latent vectors
@@ -409,15 +417,40 @@ class GAN:
                 fake = self.Gen_network(noise)
                 # label.fill_(fake_label)
                 # Classify all fake batch with D
-                output = self.Disc_network(fake.detach()).view(-1)
-                # Calculate D's loss on the all-fake batch
+                y_pred_fake = self.Disc_network(fake.detach()).view(-1)
 
-                errD_fake = criterion(output, f_label)
+                if self.loss_function == 0:
+                    # BCE loss
+                    errD_fake = criterion(y_pred_fake, f_label)
+                    errD_fake.backward()
+                    errD = errD_real + errD_fake
+                elif self.loss_function == 1:
+                    # MSE loss
+                    errD_fake = torch.mean((y_pred_fake)**2)
+                    errD_fake.backward()
+                    errD = errD_real + errD_fake
+                elif self.loss_function ==2:
+                    # RSGAN
+                    label = torch.full((b_size,), real_label, device=self.device)
+                    errD = BCE_stable(y_pred - y_pred_fake, label)
+                    errD.backward()
+                elif self.loss_function == 3:
+                    #RAGAN
+                    # Add the gradients from the all-real and all-fake batches
+                    y = torch.full((b_size,), real_label, device=self.device)
+                    y2 = torch.full((b_size,), fake_label, device=self.device)
+                    errD = (BCE_stable(y_pred - torch.mean(y_pred_fake), y) + BCE_stable(
+                        y_pred_fake - torch.mean(y_pred),y2)) / 2
+                    errD.backward()
+                elif self.loss_function == 4:
+                    errD_fake = torch.mean(torch.nn.ReLU()(1.0 + y_pred_fake))
+                    # Calculate the gradients for this batch
+                    errD_fake.backward()
+
+
                 # Calculate the gradients for this batch
-                errD_fake.backward()
-                D_G_z1 = output.mean().item()
-                # Add the gradients from the all-real and all-fake batches
-                errD = errD_real + errD_fake
+
+                D_G_z1 = y_pred_fake.mean().item()
                 # Update D
                 optimizerD.step()
 
@@ -427,12 +460,37 @@ class GAN:
                 self.Gen_network.zero_grad()
                 label.fill_(real_label)  # fake labels are real for generator cost
                 # Since we just updated D, perform another forward pass of all-fake batch through D
-                output = self.Disc_network(fake).view(-1)
+                y_pred_fake = self.Disc_network(fake).view(-1)
                 # Calculate G's loss based on this output
-                errG = criterion(output, label)
+                if self.loss_function == 0:
+                    #BCE
+                    errG = criterion(y_pred_fake, label)
+                elif self.loss_function ==1 :
+                    #MSE
+                    errG = torch.mean((y_pred_fake - label) ** 2)
+                elif self.loss_function == 2:
+                    #RSGAN
+                    label = torch.full((b_size,), real_label, device=self.device)
+                    y_pred = self.Disc_network(real_cpu).view(-1)
+                    errG = BCE_stable(y_pred_fake - y_pred, label)
+                elif self.loss_function == 3:
+                    #RAGAN
+                    y_pred = self.Disc_network(real_cpu).view(-1)
+                    y = torch.full((b_size,), real_label, device=self.device)
+                    # Calculate G's loss based on this output
+                    # Non-saturating
+                    y2 = torch.full((b_size,), fake_label, device=self.device)
+                    errG = (BCE_stable(y_pred - torch.mean(y_pred_fake), y2) + BCE_stable(
+                        y_pred_fake - torch.mean(y_pred),y)) / 2
+                    # Calculate gradients for G
+                elif self.loss_function == 4:
+                    #Higen loss
+                    errG = -torch.mean(y_pred_fake)
+
+
                 # Calculate gradients for G
                 errG.backward()
-                D_G_z2 = output.mean().item()
+                D_G_z2 = y_pred_fake.mean().item()
                 # Update G
                 optimizerG.step()
 
@@ -453,7 +511,7 @@ class GAN:
                     img_list.append(vutils.make_grid(fake, padding=2, normalize=True))
 
                     # THINK ABOUT SAVING THE RESULTS AND IMAGES AND MODEL
-                    path = 'C:/Users/RACHIT/Desktop/GAN_Evolution-master/output_images/'
+                    path = 'C:/Users/RACHIT/Desktop/GAGAN/output_images/'
                     size_figure_grid = 5
                     fig, ax = plt.subplots(size_figure_grid, size_figure_grid, figsize=(5, 5))
                     for i, j in itertools.product(range(size_figure_grid), range(size_figure_grid)):
@@ -470,6 +528,11 @@ class GAN:
                     plt.close()
 
                 iters += 1
+
+
+
+
+
 ###################################################################################################
 # ############################################ TEST MAIN FUNCTION  ###############################################
 ###################################################################################################
@@ -495,16 +558,23 @@ def main():
     input_channel =1
     output_dim =64
     lrate = 0.0002
-    lossfunction = 0
+    lossfunction = 2
     epochs = 20
     my_gan_descriptor = GANDescriptor(input_channel, output_dim, lossfunction, lrate,dataloader,epochs)
 
-    g_layer = np.random.randint(2,11) # Number of hidden layers
+    # g_layer = np.random.randint(2,11) # Number of hidden layers
     g_layer = 5
     g_activations = [randint(0, 3) for x in range(g_layer - 1)]
-    g_opChannels = [randint(64, 513) for i in range(g_layer - 2)]
-    # Generator output should be
-    g_opChannels.append(64)
+
+    gchannels={5: [512,256,128,64,64],
+              6: [512,512,256,128,64,64],
+              7: [512,512,256,256,128,64,64],
+              8: [512,512,256,256,128,128,64,64],
+              9: [512,512,256,256,128,128,64,64,64],
+              10:[512,512,512,256,256,128,128,64,64,64]}
+    g_opChannels = gchannels[g_layer]
+
+
     g_weight_init = 0
     g_loop = 1
     nz = 100
@@ -512,11 +582,17 @@ def main():
     my_gan_descriptor.gan_generator_initialization(g_layer, input_channel,output_dim,g_opChannels,
                                                        g_weight_init,g_activations,g_loop)
 
-    d_layer = np.random.randint(2,9) # Number of hidden layers
-    d_layer = 6
+    # d_layer = np.random.randint(2,9) # Number of hidden layers
+    d_layer = 5
     d_weight_init = 0
     d_activations = [randint(0, 3) for x in range(d_layer - 1)]
-    d_opChannels = [randint(64, 513) for i in range(d_layer - 1)]
+    dchannels={5: [64,128,256,512,512],
+              6: [64,64,128,256,512,512],
+              7: [64,64,128,128,256,512,512],
+              8: [64,64,128,128,256,256,512,512],
+              9: [64,64,128,128,256,256,512,512,512],
+              10:[64,64,64,128,128,256,256,512,512,512]}
+    d_opChannels = dchannels[d_layer]
     d_loop = 1
     my_gan_descriptor.gan_discriminator_initialization(d_layer, input_channel,output_dim,d_opChannels,
                                                    d_weight_init,d_activations ,d_loop)

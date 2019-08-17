@@ -11,23 +11,24 @@ from deap import base
 from deap import creator
 from deap import tools
 import copy
-from tunable_gan_class_optimization import xavier_init, GAN, GANDescriptor
-from Class_F_Functions import pareto_frontier, FFunctions, igd
+from gan_class import GAN, GANDescriptor
 import os
 import matplotlib.pyplot as plt
+import copy
+import torch
+import torch.nn.parallel
+import torch.utils.data
+import torchvision.datasets as dset
+import torchvision.transforms as transforms
+from numpy.random import randint
+import itertools
+from metrics.fid import fid_score
+from util import tools
+from metrics import generative_score
+
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-
-# This function set the seeds of the tensorflow function
-# to make this notebook's output stable across runs
-
-
-def reset_graph(seed=42):
-    global All_Evals
-    tf.reset_default_graph()
-    tf.set_random_seed(All_Evals)
-    np.random.seed(All_Evals)
-    random.seed(All_Evals)
 
 
 #####################################################################################################
@@ -42,110 +43,105 @@ class MyContainer(object):
 
 # ####################################################################################################
 
-def eval_gan_approx_igd(individual):
+def eval_gan_fid(individual):
     global All_Evals
     global best_val
     global Eval_Records
     global test1
     global test2
 
-    reset_graph(myseed)
 
     start_time = time.time()
     my_gan_descriptor = individual.gan_descriptor
     my_gan = GAN(my_gan_descriptor)
-    my_gan.training_definition()
-    final_samples = my_gan.separated_running("fixed", ps_all_x, mb_size, number_epochs,  number_samples, print_cycle)
+    my_gan.train_gan()
     elapsed_time = time.time() - start_time
 
     # We reset the network since we do not need to keep the results of the training
     # Also due to problems with deepcopy for tensorflow
-
-    nf1, nf2 = MOP_f.evaluate_mop_function(final_samples)
-    tf1, tf2, _ = pareto_frontier(nf1, nf2)
-
-    igd_val = igd((np.vstack((tf1, tf2)).transpose(), np.vstack((test1, test2)).transpose()))[0]
+    fid_score = my_gan.getFIDScore()[0]
     All_Evals = All_Evals+1
 
-    gan_code = my_gan_descriptor.codify_components(nlayers, init_functions, act_functions, divergence_measures, lat_functions)
-    print("Eval:",  All_Evals, " PS_Size:", len(tf1), " Fitness:",  igd_val, " Time:", elapsed_time)
-    if All_Evals == 1:
-        Eval_Records = np.array(gan_code+[All_Evals, len(tf1), igd_val, elapsed_time])
-    else:
-        Eval_Records = np.vstack((Eval_Records, np.array(gan_code+[All_Evals, len(tf1), igd_val, elapsed_time])))
+    print("Eval:",  All_Evals, " Fitness:",  fid_score, " Time:", elapsed_time)
 
-    if igd_val < best_val:
-        best_val = igd_val
+    if fid_score < best_val:
+        best_val = fid_score
 
-        fig = plt.figure(figsize=(5,5))
-        ax = fig.add_subplot(111)
-        ax.set_xlabel('$f(x_1)$', fontsize=25)
-        ax.set_ylabel('$f(x_2)$', fontsize=25)
-        plt.plot(test1, test2, 'b.')
-        plt.subplots_adjust(hspace=0, wspace=0, left=0.2, right=1, bottom=0.16, top=1)
-        plt.xticks(np.arange(0, np.max(nf1), 0.5), fontsize=20)
-        plt.yticks(np.arange(0, np.max(nf1), 0.5), fontsize=20)
-        plt.plot(nf1, nf2, 'r.')
-        plt.text(0, 0, str(igd_val)+' -- '+str(len(tf1)), size=15)
-        #plt.show()
-        fig.savefig("DeapGAN_"+str(my_gan_descriptor.fmeasure)+"_"+Function+'_eval_'+str(All_Evals)+'.pdf')
-        plt.close()
+        #MAKE A GRAPH OF FID SCORE OVER GENERATIONS
+
+        # fig = plt.figure(figsize=(5,5))
+        # ax = fig.add_subplot(111)
+        # ax.set_xlabel('$f(x_1)$', fontsize=25)
+        # ax.set_ylabel('$f(x_2)$', fontsize=25)
+        # plt.plot(test1, test2, 'b.')
+        # plt.subplots_adjust(hspace=0, wspace=0, left=0.2, right=1, bottom=0.16, top=1)
+        # plt.xticks(np.arange(0, np.max(nf1), 0.5), fontsize=20)
+        # plt.yticks(np.arange(0, np.max(nf1), 0.5), fontsize=20)
+        # plt.plot(nf1, nf2, 'r.')
+        # plt.text(0, 0, str(igd_val)+' -- '+str(len(tf1)), size=15)
+        # #plt.show()
+        # fig.savefig("DeapGAN_"+str(my_gan_descriptor.fmeasure)+"_"+Function+'_eval_'+str(All_Evals)+'.pdf')
+        # plt.close()
 
         # my_gan_descriptor.print_components()
 
-    return igd_val, elapsed_time
+    return fid_score, elapsed_time
 
 #####################################################################################################
 
 
 def init_individual(ind_class):
+    # Root directory for dataset
+    dataroot = "mnist_png/training"
+    image_size = 64
+    dataset = dset.ImageFolder(root=dataroot,
+                               transform=transforms.Compose([
+                                   transforms.Grayscale(1),
+                                   transforms.Resize(image_size),
+                                   transforms.CenterCrop(image_size),
+                                   transforms.ToTensor(),
+                                   transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                               ]))
+    # Create the dataloader
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=64,
+                                             shuffle=True, num_workers=2)
 
-    generator_n_hidden = np.random.randint(nlayers)+1                                 # Number of hidden layers
-    discriminator_n_hidden = np.random.randint(nlayers)+1                             # Number of hidden layers
+    input_channel = 1
+    output_dim = 64
+    lrate = 0.0002
+    lossfunction = randint(0,5)
+    epochs = 20
+    my_gan_descriptor = GANDescriptor(input_channel, output_dim, lossfunction, lrate, dataloader, epochs)
 
-    generator_dim_list = [np.random.randint(max_layer_size)+1 for _ in range(generator_n_hidden)]
-    discriminator_dim_list = [np.random.randint(max_layer_size)+1 for _ in range(discriminator_n_hidden)]
+    g_layer = np.random.randint(5,11) # Number of layers
+    g_activations = [randint(0, 3) for x in range(g_layer - 1)]
 
-    gen_number_loop_train = np.random.randint(nloops)+1                            # Number loops for training generator
-    disc_number_loop_train = np.random.randint(nloops)+1                        # Number loops for training discriminator
+    gchannels = {5: [512, 256, 128, 64, 64],
+                 6: [512, 512, 256, 128, 64, 64],
+                 7: [512, 512, 256, 256, 128, 64, 64],
+                 8: [512, 512, 256, 256, 128, 128, 64, 64],
+                 9: [512, 512, 256, 256, 128, 128, 64, 64, 64],
+                 10: [512, 512, 512, 256, 256, 128, 128, 64, 64, 64]}
+    g_opChannels = gchannels[g_layer]
 
-    # divergence_measures = ["Standard_Divergence","Total_Variation","Forward_KL","Reverse_KL","Pearson_Chi_squared","Squared_Hellinger","Least_squared"]
+    g_weight_init = 0
+    g_loop = 1
+    d_layer = np.random.randint(5,11) # Number of layers
+    d_weight_init = 0
+    d_activations = [randint(0, 3) for x in range(d_layer - 1)]
+    dchannels = {5: [64, 128, 256, 512, 512],
+                 6: [64, 64, 128, 256, 512, 512],
+                 7: [64, 64, 128, 128, 256, 512, 512],
+                 8: [64, 64, 128, 128, 256, 256, 512, 512],
+                 9: [64, 64, 128, 128, 256, 256, 512, 512, 512],
+                 10: [64, 64, 64, 128, 128, 256, 256, 512, 512, 512]}
+    d_opChannels = dchannels[d_layer]
+    d_loop = 1
 
-    fmeasure = divergence_measures[np.random.randint(len(divergence_measures))]
-
-    i_g_function = init_functions[np.random.randint(len(init_functions))]   # List or random init functions for generator
-    i_d_function = init_functions[np.random.randint(len(init_functions))]   # List or random init functions for discriminator
-
-    generator_init_functions = []
-    discriminator_init_functions = []
-
-    generator_act_functions = []
-    discriminator_act_functions = []
-
-    for i in range(generator_n_hidden+1):
-        generator_init_functions.append(i_g_function)
-        if i == generator_n_hidden:
-            generator_act_functions.append(None)        # Activation functions for all layers in generator
-        else:
-            generator_act_functions.append(act_functions[np.random.randint(len(act_functions))])
-
-    for i in range(discriminator_n_hidden+1):
-        discriminator_init_functions.append(i_d_function)
-        if i == discriminator_n_hidden:
-            discriminator_act_functions.append(None)        # Activation functions for all layers in discriminator
-        else:
-            discriminator_act_functions.append(act_functions[np.random.randint(len(act_functions))])
-
-    latent_distribution_function = lat_functions[np.random.randint(len(lat_functions))]             # Distribution for latent random samples
-
-    lrate = np.random.choice(lrates)
-
-    my_gan_descriptor = GANDescriptor(X_dim, z_dim, latent_distribution_function, fmeasure, lrate)
-
-    my_gan_descriptor.gan_discriminator_initialization(generator_n_hidden, generator_dim_list,
-                                                       generator_init_functions,  generator_act_functions, gen_number_loop_train)
-    my_gan_descriptor.gan_generator_initialization(discriminator_n_hidden, discriminator_dim_list,
-                                                   discriminator_init_functions,  discriminator_act_functions, disc_number_loop_train)
+    my_gan_descriptor.gan_generator_initialization(g_layer, input_channel, output_dim, g_opChannels,
+                                                   g_weight_init, g_activations, g_loop)
+    my_gan_descriptor.gan_discriminator_initialization(d_layer, input_channel, output_dim, d_opChannels,
+                                                       d_weight_init, d_activations, d_loop)
 
     ind = ind_class(my_gan_descriptor)
 
@@ -246,7 +242,7 @@ def init_ga():
     toolbox.register("individual", init_individual, creator.Individual)
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
-    toolbox.register("evaluate", eval_gan_approx_igd)
+    toolbox.register("evaluate", eval_gan_fid)
     toolbox.register("mate", cx_gan)
     toolbox.register("mutate", mut_gan)
 
