@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import tensorflow as tf
 import numpy as np
 import random
 import time
@@ -107,12 +106,12 @@ def init_individual(ind_class):
 
     input_channel = 1
     output_dim = 64
-    lrate = 0.0002
+    lrate = 0.001
     lossfunction = randint(0,5)
-    epochs = 2
+    epochs = 25
     my_gan_descriptor = GANDescriptor(input_channel, output_dim, lossfunction, lrate, dataloader, epochs)
 
-    g_layer = np.random.randint(5,8) # Number of layers
+    g_layer = np.random.randint(5,max_layer) # Number of layers
     g_activations = [randint(0, 3) for x in range(g_layer - 1)]
 
 
@@ -120,7 +119,7 @@ def init_individual(ind_class):
 
     g_weight_init = 0
     g_loop = 1
-    d_layer = np.random.randint(5,8) # Number of layers
+    d_layer = np.random.randint(5,max_layer) # Number of layers
     d_weight_init = 0
     d_activations = [randint(0, 3) for x in range(d_layer - 1)]
 
@@ -142,11 +141,14 @@ def cx_gan(ind1, ind2):
     """Crossover between two GANs
        The networks of the two GANs are exchanged
     """
-    off1 = copy.deepcopy(ind1)
-    off1.Disc_network = copy.deepcopy(ind2.Disc_network)
-    ind2.Gen_network = copy.deepcopy(ind1.Gen_network)
 
-    ind1 = off1
+    off1 = copy.deepcopy(ind1.GAN)
+
+    off1.Disc_network = copy.deepcopy(ind2.GAN.Disc_network)
+
+    ind2.GAN.Gen_network = copy.deepcopy(ind1.GAN.Gen_network)
+
+    ind1.GAN = off1
 
     return ind1, ind2
 
@@ -162,6 +164,7 @@ def mut_gan(individual):
 
     gan = individual.GAN
     my_gan_descriptor = gan.descriptor
+    updateNetwork = False
 
 
     if random.random() < 0.5:                   # Discriminator will be mutated
@@ -172,10 +175,10 @@ def mut_gan(individual):
         update_net = 'G'
 
     # Decide the type of the mutation
-    if aux_network.number_layers < 9:
+    if aux_network.number_layers >5 and aux_network.number_layers < max_layer-2:
         type_mutation = mutation_types[np.random.randint(len(mutation_types))]
     else:
-        type_mutation = mutation_types[np.random.randint(1, len(mutation_types))]
+        type_mutation = mutation_types[np.random.randint(2, len(mutation_types))]
 
     # if type_mutation == "network_loops":       # The number of loops for the network learning is changed
     #     aux_network.number_loop_train = np.random.randint(nloops)+1
@@ -197,27 +200,39 @@ def mut_gan(individual):
             aux_network.list_ouput_channels = dchannels[aux_network.number_layers]
         if(update_net == 'G'):
             aux_network.list_ouput_channels = gchannels[aux_network.number_layers]
+
+        updateNetwork = True
     elif type_mutation == "del_layer":              # We remove one layer
         aux_network.number_layers -= 1
-        aux_network.list_act_functions = aux_network.list_act_functions[:aux_network.number_layers]
-        if(update_net == 'D'):
-            aux_network.list_ouput_channels = dchannels[aux_network.number_layers]
-        if(update_net == 'G'):
-            aux_network.list_ouput_channels = gchannels[aux_network.number_layers]
+        if(aux_network.number_layers >5):
+            #only delete the layer if the layer count is 6
+            del aux_network.list_act_functions[-1]
+            if(update_net == 'D'):
+                aux_network.list_ouput_channels = dchannels[aux_network.number_layers]
+            if(update_net == 'G'):
+                aux_network.list_ouput_channels = gchannels[aux_network.number_layers]
+            updateNetwork =True
+    elif type_mutation == "activation":             #
 
-    elif type_mutation == "activation":             # We change the activation function in layer
-        layer_pos = np.random.randint(aux_network.number_layers)
+        # TODO debug where the list_act_functions is decremented
+        while(len(aux_network.list_act_functions) < aux_network.number_layers):
+            aux_network.list_act_functions.append(randint(0,3))
+        # We change the activation function in layer
+
+        layer_pos = randint(aux_network.number_layers)
         aux_network.list_act_functions[layer_pos] = randint(0, 3)
+
+        updateNetwork = True
     elif type_mutation == "lossfunction":             # We change the divergence measure used by the GAN
         fmeasure =randint(0, 5)
         aux_network.lossfunction = fmeasure
+        updateNetwork = False
 
-
-    if(update_net == 'D'):
+    if(update_net == 'D' and update_net):
         del gan.Disc_network
         gan.init_d_model = True
         gan.Disc_network = Discriminator(aux_network).to(gan.device)
-    if(update_net == 'G'):
+    if(update_net == 'G' and update_net):
         del gan.Gen_network
         gan.init_g_model = True
         gan.Gen_network = Generator(aux_network).to(gan.device)
@@ -267,9 +282,10 @@ def aplly_ga_gan(toolbox, pop_size=10, gen_number=50, cxpb=0.7, mutpb=0.3):
     """
           Application of the Genetic Algorithm
     """
-
+    hall_of_fame = 3
+    offspring_count = pop_size-2
     pop = toolbox.population(n=pop_size)
-    hall_of = tools.HallOfFame(pop_size)
+    hall_of = tools.HallOfFame(hall_of_fame)
     stats = tools.Statistics(lambda ind: ind.fitness.values)
 
     stats.register("avg", np.mean, axis=0)
@@ -277,22 +293,35 @@ def aplly_ga_gan(toolbox, pop_size=10, gen_number=50, cxpb=0.7, mutpb=0.3):
     stats.register("min", np.min, axis=0)
     stats.register("max", np.max, axis=0)
 
-    result, log_book = algorithms.eaMuPlusLambda(pop, toolbox, mu=pop_size, lambda_=pop_size, cxpb=cxpb, mutpb=mutpb,
+    result, log_book = algorithms.eaMuPlusLambda(pop, toolbox, mu=pop_size, lambda_=offspring_count, cxpb=cxpb, mutpb=mutpb,
                                                  stats=stats, halloffame=hall_of, ngen=gen_number, verbose=1)
 
     return result, log_book, hall_of
 
 #####################################################################################################
 
-
+def printNetwork(obj):
+    print("layers :",obj.number_layers)
+    print("input dim :",obj.input_dim)
+    print("output dim  :",obj.output_dim)
+    print("op channels :",obj.list_ouput_channels)
+    print("loops :",obj.number_loop_train)
+    print("init functions :",obj.init_functions)
+    print("act functions :",obj.list_act_functions)
+    print("loss function :",obj.lossfunction)
 if __name__ == "__main__":
     #   main()
+    import warnings
+    warnings.filterwarnings("ignore")
+
     global All_Evals
     global best_val
     global Eval_Records
     global test1
     global test2
     global gchannels
+    global max_layer
+    max_layer = 8
     gchannels = {5: [512, 256, 128, 64, 64],
                  6: [512, 512, 256, 128, 64, 64],
                  7: [512, 512, 256, 256, 128, 64, 64],
@@ -312,10 +341,10 @@ if __name__ == "__main__":
     best_val = 10000
     Eval_Records = None
 
-    ngen = 3                # Number of generations
-    npop = 2
+    ngen = 25                # Number of generations
+    npop = 6
     SEL = 0                 # Selection method
-    CXp = 0.03            # Crossover probability (Mutation is 1-CXp)
+    CXp = 0.2           # Crossover probability (Mutation is 1-CXp)
     # nselpop = args.integers[12]             # SelecteWWd population size
     # if len(args.integers) > 13:
     #     tournsel_size = args.integers[13]   # Tournament value
@@ -332,6 +361,18 @@ if __name__ == "__main__":
 
     # Runs the GA
     res, logbook, hof = aplly_ga_gan(toolb, pop_size=npop, gen_number=ngen, cxpb=CXp, mutpb=1-CXp)
+
+    print("########### BEST NETWORK  #########################")
+
+    print("Discriminator :")
+    printNetwork(hof.items[0].GAN.descriptor.Disc_network)
+
+    print("Generator :")
+    printNetwork(hof.items[0].GAN.descriptor.Gen_network)
+
+    print("############# LOG BOOK ################")
+    print(logbook)
+
 
     # Examples of how to call the function
     # ./GAN_Descriptor_Deap.py 111 1000 10 1 30 10 5 50 20 1000 0 20 10 5

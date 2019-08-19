@@ -21,7 +21,8 @@ from metrics import generative_score
 ###############################################################################################################################
 # ########################################################## Network Descriptor #######################################################################################################################################################################################
 
-
+base_fid_statistics = None
+inception_model = None
 class NetworkDescriptor:
     def __init__(self, number_layers=1, input_dim=1, output_dim=1,  list_ouput_channels=None, init_functions=1, list_act_functions=None, number_loop_train=1,lossfunction=0):
         self.number_layers = number_layers
@@ -244,12 +245,25 @@ class GAN:
         #INIT INCEPTION MODEL ONLY ONCE(!)
 
         # Get FID score for the model:
-        base_fid_statistics, inception_model = generative_score.initialize_fid(self.dataloader, sample_size=1000)
+        global base_fid_statistics,inception_model
+        if(base_fid_statistics is None and inception_model is None):
+            print('calling inception model')
+            base_fid_statistics, inception_model = generative_score.initialize_fid(self.dataloader, sample_size=1000)
 
-        noise = torch.randn(1000, 100, 1, 1, device=self.device)
 
+        generated_images = None
         self.Gen_network.eval()
-        generated_images = self.Gen_network(noise).detach()
+
+        for i in range(1):
+            if (i ==15):
+                noise = torch.randn(40, 100, 1, 1, device=self.device)
+            else:
+                noise = torch.randn(64, 100, 1, 1, device=self.device)
+            images = self.Gen_network(noise).detach()
+            if(type(generated_images) != type(None)):
+                generated_images = torch.cat((generated_images,images),0)
+            else:
+                generated_images = images
         inception_model = tools.cuda(inception_model)
         m1, s1 = fid_score.calculate_activation_statistics(
             generated_images.data.cpu().numpy(), inception_model, cuda=tools.is_cuda_available(),
@@ -270,8 +284,9 @@ class GAN:
         beta1 = 0.5
         # Set random seem for reproducibility
         manualSeed = 999
+        b_size = 64
         # manualSeed = random.randint(1, 10000) # use if you want new results
-        print("Random Seed: ", manualSeed)
+        # print("Random Seed: ", manualSeed)
         random.seed(manualSeed)
         torch.manual_seed(manualSeed)
 
@@ -284,20 +299,19 @@ class GAN:
             self.optimizerD = optim.Adam(self.Disc_network.parameters(), lr=self.descriptor.lrate, betas=(beta1, 0.999))
             self.init_d_model = False
 
-        # ADD DIFFERENT LOSS FUCNTIONS
+        # DIFFERENT LOSS FUCNTIONS
 
         if self.loss_function ==0:
             criterion = torch.nn.BCELoss()
         elif (self.loss_function == 2 or 3):
             BCE_stable = torch.nn.BCEWithLogitsLoss()
 
-        # Create batch of latent vectors that we will use to visualize
-        #  the progression of the generator
-        fixed_noise = torch.randn(64, nz, 1, 1, device=self.device)
+
         # Establish convention for real and fake labels during training
         real_label = 1
         fake_label = 0
-
+        label = torch.full((b_size,), real_label, device=self.device)
+        f_label = torch.full((b_size,), fake_label, device=self.device)
         print("Starting Training Loop...")
         # Lists to keep track of progress
         img_list = []
@@ -321,9 +335,6 @@ class GAN:
                 # Format batch
                 real_cpu = data[0].to(self.device)
 
-                b_size = real_cpu.size(0)
-                label = torch.full((b_size,), real_label, device=self.device)
-                f_label = torch.full((b_size,), fake_label, device=self.device)
                 # Forward pass real batch through D
                 y_pred = self.Disc_network(real_cpu).view(-1)
 
@@ -364,16 +375,13 @@ class GAN:
                     errD = errD_real + errD_fake
                 elif self.loss_function ==2:
                     # RSGAN
-                    label = torch.full((b_size,), real_label, device=self.device)
                     errD = BCE_stable(y_pred - y_pred_fake, label)
                     errD.backward()
                 elif self.loss_function == 3:
                     #RAGAN
                     # Add the gradients from the all-real and all-fake batches
-                    y = torch.full((b_size,), real_label, device=self.device)
-                    y2 = torch.full((b_size,), fake_label, device=self.device)
-                    errD = (BCE_stable(y_pred - torch.mean(y_pred_fake), y) + BCE_stable(
-                        y_pred_fake - torch.mean(y_pred),y2)) / 2
+                    errD = (BCE_stable(y_pred - torch.mean(y_pred_fake), label) + BCE_stable(
+                        y_pred_fake - torch.mean(y_pred),f_label)) / 2
                     errD.backward()
                 elif self.loss_function == 4:
                     errD = torch.mean(torch.nn.ReLU()(1.0 + y_pred_fake))
@@ -391,7 +399,7 @@ class GAN:
                 # (2) Update G network: maximize log(D(G(z)))
                 ###########################
                 self.Gen_network.zero_grad()
-                label.fill_(real_label)  # fake labels are real for generator cost
+
                 # Since we just updated D, perform another forward pass of all-fake batch through D
                 y_pred_fake = self.Disc_network(fake).view(-1)
                 # Calculate G's loss based on this output
@@ -403,16 +411,13 @@ class GAN:
                     errG = torch.mean((y_pred_fake - label) ** 2)
                 elif self.loss_function == 2:
                     #RSGAN
-                    label = torch.full((b_size,), real_label, device=self.device)
                     y_pred = self.Disc_network(real_cpu).view(-1)
                     errG = BCE_stable(y_pred_fake - y_pred, label)
                 elif self.loss_function == 3:
                     #RAGAN
                     y_pred = self.Disc_network(real_cpu).view(-1)
-                    y = torch.full((b_size,), real_label, device=self.device)
-                    y2 = torch.full((b_size,), fake_label, device=self.device)
-                    errG = (BCE_stable(y_pred - torch.mean(y_pred_fake), y2) + BCE_stable(
-                        y_pred_fake - torch.mean(y_pred),y)) / 2
+                    errG = (BCE_stable(y_pred - torch.mean(y_pred_fake), f_label) + BCE_stable(
+                        y_pred_fake - torch.mean(y_pred),label)) / 2
                 elif self.loss_function == 4:
                     #Higen loss
                     errG = -torch.mean(y_pred_fake)
@@ -437,6 +442,9 @@ class GAN:
                 # Check how the generator is doing by saving G's output on fixed_noise
                 if (iters % 20 == 0) or ((epoch == self.epochs- 1) and (i == len(self.dataloader) - 1)):
                     with torch.no_grad():
+                        # Create batch of latent vectors that we will use to visualize
+                        #  the progression of the generator
+                        fixed_noise = torch.randn(64, nz, 1, 1, device=self.device)
                         fake = self.Gen_network(fixed_noise).detach().cpu()
                     img_list.append(vutils.make_grid(fake, padding=2, normalize=True))
 
@@ -489,7 +497,7 @@ class GAN:
 #     output_dim =64
 #     lrate = 0.0002
 #     lossfunction = 2
-#     epochs = 20
+#     epochs = 2
 #     my_gan_descriptor = GANDescriptor(input_channel, output_dim, lossfunction, lrate,dataloader,epochs)
 #
 #     # g_layer = np.random.randint(2,11) # Number of hidden layers
@@ -529,10 +537,12 @@ class GAN:
 #
 #
 #     individual = GAN(my_gan_descriptor)
-#     print(individual.Gen_network)
-#     print(individual.Disc_network)
+#     # print(individual.Gen_network)
+#     # print(individual.Disc_network)
 #
 #     individual.train_gan()
+#     individual.getFIDScore()
+#     print('test fid again..')
 # if __name__ == '__main__':
 #     # freeze_support() here if program needs to be frozen
 #     main()  # exec
