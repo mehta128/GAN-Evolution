@@ -4,6 +4,7 @@ import argparse
 import numpy as np
 import random
 import time
+import csv
 
 from deap import algorithms
 from deap import base
@@ -59,12 +60,17 @@ def eval_gan_fid(individual):
     fid_score = my_gan.getFIDScore()
     torch.cuda.empty_cache()
 
+    # if not offspring save the fid score and time
+    if my_gan.offspring == 0:
+        my_gan.results[my_gan.gen_no] = [fid_score,elapsed_time]
+
     All_Evals = All_Evals+1
 
     print("Eval:",  All_Evals, " Fitness:",  fid_score, " Time:", elapsed_time)
     if fid_score < best_val:
         best_val = fid_score
-
+        torch.save(individual.GAN.Gen_network, "bestG.pkl")
+        torch.save(individual.GAN.Disc_network, "bestD.pkl")
     # Todo store data for geneting results 1. Graph for fid score and 2. Time for pareto set with gan individual
         #MAKE A GRAPH OF FID SCORE OVER GENERATIONS
 
@@ -87,11 +93,14 @@ def eval_gan_fid(individual):
     return fid_score, elapsed_time
 
 #####################################################################################################
+def inc_individual():
+    global indi_no
+    indi_no += 1
 
 
 def init_individual(ind_class):
     # Root directory for dataset
-    dataroot = "mnist_png/training"
+
     image_size = 64
     dataset = dset.ImageFolder(root=dataroot,
                                transform=transforms.Compose([
@@ -110,8 +119,8 @@ def init_individual(ind_class):
     lrate = 0.001
     lossfunction = randint(0,5)
 
-    my_gan_descriptor = GANDescriptor(input_channel, output_dim, lossfunction, lrate, dataloader, epochs)
-
+    my_gan_descriptor = GANDescriptor(input_channel, output_dim, lossfunction, lrate, dataloader, epochs,indi_no)
+    inc_individual()
     g_layer = np.random.randint(5,max_layer) # Number of layers
     g_activations = [randint(0, 3) for x in range(g_layer - 1)]
 
@@ -311,9 +320,6 @@ def init_ga():
     """
                          Definition of GA operators
     """
-
-    # Minimization of the IGD measure
-
     creator.create("Fitness", base.Fitness, weights=(-1.0, -1.0))
 
     creator.create("Individual", MyContainer, fitness=creator.Fitness)
@@ -364,14 +370,15 @@ def aplly_ga_gan(toolbox, pop_size=10, gen_number=50, cxpb=0.7, mutpb=0.3):
 #####################################################################################################
 
 def printNetwork(obj):
-    print("layers :",obj.number_layers)
-    print("input dim :",obj.input_dim)
-    print("output dim  :",obj.output_dim)
-    print("op channels :",obj.list_ouput_channels)
-    print("loops :",obj.number_loop_train)
-    print("init functions :",obj.init_functions)
-    print("act functions :",obj.list_act_functions)
-    print("loss function :",obj.lossfunction)
+    network = ["layers :"+str(obj.number_layers)+" \n"]
+    network.append("op channels :"+str(obj.list_ouput_channels)+" \n")
+    network.append("loops :"+str(obj.number_loop_train)+" \n")
+    network.append("init functions"+str(obj.init_functions)+" \n")
+    network.append("activation functions :"+str(obj.list_act_functions)+" \n")
+    network.append("loss function :"+str(obj.lossfunction)+ " \n")
+
+
+    return  network
 if __name__ == "__main__":
     #   main()
     import warnings
@@ -386,16 +393,9 @@ if __name__ == "__main__":
     global max_layer
     global epochs
     global dchannels
+    global dataroot
 
-    epochs = 1
-    max_layer = 8
-    ngen = 50                # Number of generations
-    npop = 7
-    SEL = 0                 # Selection method
-    CXp = 0.2          # Crossover probability (Mutation is 1-CXp)
-    Mxp = 1-CXp
-
-
+    indi_no = 1
     gchannels = {5: [512, 256, 128, 64, 64],
                  6: [512, 512, 256, 128, 64, 64],
                  7: [512, 512, 256, 256, 128, 64, 64],
@@ -411,6 +411,16 @@ if __name__ == "__main__":
                  9: [64, 64, 128, 128, 256, 256, 512, 512, 512],
                  10: [64, 64, 64, 128, 128, 256, 256, 512, 512, 512]}
 
+    dataroot = "mnist_png/training"
+    epochs = 1 # 20 iter per epochs- 64*20 = 1028 samples
+    max_layer = 8
+    ngen = 50                # Number of generations
+    npop = 7
+    SEL = 0                 # Selection method
+    CXp = 0.2          # Crossover probability (Mutation is 1-CXp)
+    Mxp = 1-CXp
+
+
     All_Evals = 0
     best_val = 10000
     Eval_Records = None
@@ -421,17 +431,27 @@ if __name__ == "__main__":
     mutation_types = ["add_layer", "del_layer", "activation", "lossfunction"]
     # GA initialization
     toolb = init_ga()
-
     # Runs the GA
     res, logbook, hof = aplly_ga_gan(toolb, pop_size=npop, gen_number=ngen, cxpb=CXp, mutpb=Mxp)
 
-    print("########### BEST NETWORK  #########################")
-    print("Fitness :",hof.items[0].fitness)
-    print("Discriminator :")
-    printNetwork(hof.items[0].GAN.descriptor.Disc_network)
+    # Save the FID and time score to the csv file
+    for ind in res:
+        fname = 'C:/Users/RACHIT/Desktop/GAGAN/results/ind_'+str(ind.GAN.indi_no)+'.csv'
+        file = open(fname, "w", newline='')
+        w = csv.writer(file)
+        w.writerow(["Generation", "Fid", "Time"])
+        for key, val in ind.GAN.results.items():
+            w.writerow([key, val[0], val[1]])
+        file.close()
+    # Save the network architecture to the text file
+    for ind in res:
+        fname ='C:/Users/RACHIT/Desktop/GAGAN/results/ind_'+str(ind.GAN.indi_no)+'.txt'
+        file1 = open(fname, "w")
+        file1.write("Fitness :"+str(ind.fitness)+" \n")
+        file1.writelines(printNetwork(ind.GAN.descriptor.Disc_network))
+        file1.writelines(printNetwork(ind.GAN.descriptor.Gen_network))
+        file1.close()
 
-    print("Generator :")
-    printNetwork(hof.items[0].GAN.descriptor.Gen_network)
 
     print("############# LOG BOOK ################")
     print(logbook)

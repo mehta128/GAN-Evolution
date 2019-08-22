@@ -47,23 +47,13 @@ class NetworkDescriptor:
                      9: [0, 1, 0, 1, 0, 1, 0, 1, 0],
                      10: [0, 1, 1, 0, 1, 0, 1, 0, 1, 0]}
 
-    def copy_from_other_network(self, other_network):
-        self.number_layers = other_network.number_layers
-        self.input_dim = other_network.input_dim
-        self.number_loop_train = other_network.number_loop_train
-        self.init_functions = other_network.init_functions
-        self.output_dim = other_network.output_dim
-        self.list_ouput_channels = copy.deepcopy(other_network.list_ouput_channels)
-        self.list_act_functions = copy.deepcopy(other_network.list_act_functions)
-        self.nz = 100
-
 
 ###############################################################################################################################
 # ########################################################## GAN Descriptor  #######################################################################################################################################################################################
 
 
 class GANDescriptor:
-    def __init__(self, input_dim=1, output_dim=64, lossfunction=0, lrate=0.0001,dataloader=None,epochs=20):
+    def __init__(self, input_dim=1, output_dim=64, lossfunction=0, lrate=0.0001,dataloader=None,epochs=20,indi_no = None):
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.lossfunction = lossfunction
@@ -72,15 +62,8 @@ class GANDescriptor:
         self.lrate = lrate
         self.dataloader = dataloader
         self.epochs = epochs
+        self.indi_no = indi_no
         # TO recreate the model incase of specific mutation types
-
-    def copy_from_other(self, other):
-        self.input_dim = other.input_dim
-        self.output_dim = other.output_dim
-        self.lossfunction = other.lossfunction
-        self.Gen_network = copy.deepcopy(other.Gen_network)     # These are  Network_Descriptor structures
-        self.Disc_network = copy.deepcopy(other.Disc_network)
-        self.lrate = copy.deepcopy(other.lrate)
 
 
     def gan_generator_initialization(self, generator_layers=1, generator_input_dim=None, generator_output_dim=None,
@@ -221,9 +204,15 @@ class GAN:
         self.Gen_network = Generator(self.descriptor.Gen_network)
         self.init_g_model = True
         self.dataloader =self.descriptor.dataloader
-        # DL is now with GAN class no need to keep it with descriptor- can also make one common data loader
+        #Todo DL is now with GAN class no need to keep it with descriptor- can also make one common data loader
         self.descriptor.dataloader = None
         self.epochs = self.descriptor.epochs
+        self.indi_no = self.descriptor.indi_no
+        self.gen_no = 0
+        self.offspring = 0
+        self.results = {}
+
+
 
     def reset_network(self):
         self.Gen_network.reset_network()
@@ -267,9 +256,8 @@ class GAN:
 
     def train_gan(self):
         torch.cuda.empty_cache()
-        ##########
+
         # Constants for training
-        ############
         nz = 100
         # Beta1 hyperparam for Adam optimizers
         beta1 = 0.5
@@ -277,7 +265,6 @@ class GAN:
         manualSeed = 999
         b_size = 64
         # manualSeed = random.randint(1, 10000) # use if you want new results
-        # print("Random Seed: ", manualSeed)
         random.seed(manualSeed)
         torch.manual_seed(manualSeed)
 
@@ -306,7 +293,7 @@ class GAN:
         label = torch.full((b_size,), real_label, device=self.device)
         f_label = torch.full((b_size,), fake_label, device=self.device)
         print("Starting Training Loop...")
-        # Lists to keep track of progress
+        #Todo Lists to keep track of progress- make a self object
         img_list = []
         G_losses = []
         D_losses = []
@@ -317,7 +304,7 @@ class GAN:
             for i, data in enumerate(self.dataloader, 0):
 
                 # 20 batches per epoch- 64 bsize * 20 batches per epoch -> 1280 samples per epoch
-                if i > self.epochs:
+                if i > 20:
                     break
 
                 ############################
@@ -433,7 +420,7 @@ class GAN:
                 D_losses.append(errD.item())
 
                 # Check how the generator is doing by saving G's output on fixed_noise
-                if (iters % 20 == 0) or ((epoch == self.epochs- 1) and (i == len(self.dataloader) - 1)):
+                if (i % 20 == 0):
                     with torch.no_grad():
                         # Create batch of latent vectors that we will use to visualize
                         #  the progression of the generator
@@ -442,13 +429,13 @@ class GAN:
                     img_list.append(vutils.make_grid(fake, padding=2, normalize=True))
 
                     # THINK ABOUT SAVING THE RESULTS AND IMAGES AND MODEL
-                    path = 'C:/Users/RACHIT/Desktop/GAGAN/output_images/'
+                    path = 'C:/Users/RACHIT/Desktop/GAGAN/output_images/'+str(self.indi_no)+'/'
                     size_figure_grid = 5
                     fig, ax = plt.subplots(size_figure_grid, size_figure_grid, figsize=(5, 5))
                     for i, j in itertools.product(range(size_figure_grid), range(size_figure_grid)):
                         ax[i, j].get_xaxis().set_visible(False)
                         ax[i, j].get_yaxis().set_visible(False)
-                    path = path + 'Epoch_{0}_'.format(epoch) + str(i) + '.png'
+                    path = path + 'Gen_'+str(self.gen_no)+'_Offspring_'+str(self.offspring)+'.png'
 
                     for k in range(5 * 5):
                         i = k // 5
@@ -468,112 +455,76 @@ class GAN:
 ###################################################################################################
 # ############################################ TEST MAIN FUNCTION  ###############################################
 ###################################################################################################
-def main():
-
-
-    # Root directory for dataset
-    dataroot = "mnist_png/training"
-    image_size = 64
-    dataset = dset.ImageFolder(root=dataroot,
-                               transform=transforms.Compose([
-                                   transforms.Grayscale(1),
-                                   transforms.Resize(image_size),
-                                   transforms.CenterCrop(image_size),
-                                   transforms.ToTensor(),
-                                   transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-                               ]))
-    # Create the dataloader
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=64,
-                                             shuffle=True, num_workers=2)
-
-
-    input_channel =1
-    output_dim =64
-    lrate = 0.001
-    lossfunction = 0
-    epochs = 30
-    my_gan_descriptor = GANDescriptor(input_channel, output_dim, lossfunction, lrate,dataloader,epochs)
-
-    # g_layer = np.random.randint(2,11) # Number of hidden layers
-    g_layer = 5
-    g_activations = [1 for x in range(g_layer - 1)]
-    gchannels={5: [512,256,128,64,64],
-              6: [512,512,256,128,64,64],
-              7: [512,512,256,256,128,64,64],
-              8: [512,512,256,256,128,128,64,64],
-              9: [512,512,256,256,128,128,64,64,64],
-              10:[512,512,512,256,256,128,128,64,64,64]}
-    g_opChannels = gchannels[g_layer]
-
-
-    g_weight_init = 0
-    g_loop = 1
-    nz = 100
-
-    my_gan_descriptor.gan_generator_initialization(g_layer, input_channel,output_dim,g_opChannels,
-                                                       g_weight_init,g_activations,g_loop)
-
-    # d_layer = np.random.randint(2,9) # Number of hidden layers
-    d_layer = 10
-    d_weight_init = 0
-    d_activations = [0 for x in range(d_layer - 1)]
-    dchannels={5: [64,128,256,512,512],
-              6: [64,64,128,256,512,512],
-              7: [64,64,128,128,256,512,512],
-              8: [64,64,128,128,256,256,512,512],
-              9: [64,64,128,128,256,256,512,512,512],
-              10:[64,64,64,128,128,256,256,512,512,512]}
-    d_opChannels = dchannels[d_layer]
-    d_loop = 1
-    my_gan_descriptor.gan_discriminator_initialization(d_layer, input_channel,output_dim,d_opChannels,
-                                                   d_weight_init,d_activations ,d_loop)
-
-
-    individual = GAN(my_gan_descriptor)
-    print(individual.Gen_network)
-    # print(individual.Disc_network)
-    #
-    # print(individual.Gen_network.state_dict())
-    # individual.Gen_network.main = individual.Gen_network.main[:3]+individual.Gen_network.main[6:]
-    g_layer += 1
-    list_of_layers = list(individual.Gen_network.main.children())
-    pos = 1
-    new_layer = [nn.ConvTranspose2d(gchannels[g_layer][pos], gchannels[g_layer][pos], 3, 1, 1, bias=False),
-              nn.BatchNorm2d(128)]
-    new_layer += [nn.LeakyReLU(0.2)]
-
-    list_of_layers = list_of_layers[:3]+new_layer+list_of_layers[3:]
-
-    print(list_of_layers)
-    # del list_of_layers[3:6]
-    individual.Gen_network.main = nn.Sequential(*list_of_layers)
-    #
-    # # print(individual.Gen_network.state_dict())
-    #
-    print(individual.Gen_network)
-    #
-    # layer_pos = randint(d_layer - 2)
-    # c = 1
-    # for i in range(layer_pos):
-    #     c += 3
-    #
-    #
-    # d_activations[layer_pos] = randint(0, 3)
-    #
-    #
-    # print("at layer pos :"+str(layer_pos+1)+" change activation :"+str(d_activations[layer_pos]))
-    #
-    # if d_activations[layer_pos] == 0:
-    #     individual.Disc_network.main[c] = nn.LeakyReLU(0.2)
-    # elif d_activations[layer_pos] == 1:
-    #     individual.Disc_network.main[c] = nn.ReLU(inplace=True)
-    # elif d_activations[layer_pos] == 2:
-    #     individual.Disc_network.main[c] = nn.ELU(inplace=True)
-    #
-    # print(individual.Disc_network)
-    # individual.train_gan()
-    # print(individual.getFIDScore())
-
-if __name__ == '__main__':
-    # freeze_support() here if program needs to be frozen
-    main()  # exec
+# def main():
+#
+#
+#     # Root directory for dataset
+#     dataroot = "mnist_png/training"
+#     image_size = 64
+#     dataset = dset.ImageFolder(root=dataroot,
+#                                transform=transforms.Compose([
+#                                    transforms.Grayscale(1),
+#                                    transforms.Resize(image_size),
+#                                    transforms.CenterCrop(image_size),
+#                                    transforms.ToTensor(),
+#                                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+#                                ]))
+#     # Create the dataloader
+#     dataloader = torch.utils.data.DataLoader(dataset, batch_size=64,
+#                                              shuffle=True, num_workers=2)
+#
+#
+#     input_channel =1
+#     output_dim =64
+#     lrate = 0.001
+#     lossfunction = 3
+#     epochs = 50
+#     my_gan_descriptor = GANDescriptor(input_channel, output_dim, lossfunction, lrate,dataloader,epochs,1)
+#
+#     # g_layer = np.random.randint(2,11) # Number of hidden layers
+#     g_layer = 6
+#     # g_activations = [1 for x in range(g_layer - 1)]
+#     g_activations =  [1, 1, 1, 0, 1]
+#     gchannels={5: [512,256,128,64,64],
+#               6: [512,512,256,128,64,64],
+#               7: [512,512,256,256,128,64,64],
+#               8: [512,512,256,256,128,128,64,64],
+#               9: [512,512,256,256,128,128,64,64,64],
+#               10:[512,512,512,256,256,128,128,64,64,64]}
+#     g_opChannels = gchannels[g_layer]
+#
+#
+#     g_weight_init = 0
+#     g_loop = 1
+#     nz = 100
+#
+#     my_gan_descriptor.gan_generator_initialization(g_layer, input_channel,output_dim,g_opChannels,
+#                                                        g_weight_init,g_activations,g_loop)
+#
+#     # d_layer = np.random.randint(2,9) # Number of hidden layers
+#     d_layer = 6
+#     d_weight_init = 0
+#     # d_activations = [0 for x in range(d_layer - 1)]
+#     d_activations = [1, 0, 0, 1, 1]
+#     dchannels={5: [64,128,256,512,512],
+#               6: [64,64,128,256,512,512],
+#               7: [64,64,128,128,256,512,512],
+#               8: [64,64,128,128,256,256,512,512],
+#               9: [64,64,128,128,256,256,512,512,512],
+#               10:[64,64,64,128,128,256,256,512,512,512]}
+#     d_opChannels = dchannels[d_layer]
+#     d_loop = 1
+#     my_gan_descriptor.gan_discriminator_initialization(d_layer, input_channel,output_dim,d_opChannels,
+#                                                    d_weight_init,d_activations ,d_loop)
+#
+#
+#     individual = GAN(my_gan_descriptor)
+#     print(individual.Gen_network)
+#     print(individual.Disc_network)
+#
+#     individual.train_gan()
+#     print(individual.getFIDScore())
+#
+# if __name__ == '__main__':
+#     # freeze_support() here if program needs to be frozen
+#     main()  # exec

@@ -6,7 +6,7 @@ def gaMuPlusLambda(population, toolbox, mu, lambda_, cxpb, mutpb, ngen,
     logbook = algorithms.tools.Logbook()
     logbook.header = ['gen', 'nevals'] + (stats.fields if stats else [])
 
-    # Train and Evaluate the individuals
+    #  Evaluate the fitness before starting
     invalid_ind = [ind for ind in population if not ind.fitness.valid]
     fitnesses = toolbox.map(toolbox.evaluate, invalid_ind)
     for ind, fit in zip(invalid_ind, fitnesses):
@@ -27,6 +27,8 @@ def gaMuPlusLambda(population, toolbox, mu, lambda_, cxpb, mutpb, ngen,
 
         # Invalidate fitness of whole pop to train and evaluate
         for ind in population:
+            ind.GAN.gen_no = gen
+            ind.GAN.offspring = 0
             del ind.fitness.values
         # Train and Evaluate the individuals
         invalid_ind = [ind for ind in population if not ind.fitness.valid]
@@ -39,7 +41,13 @@ def gaMuPlusLambda(population, toolbox, mu, lambda_, cxpb, mutpb, ngen,
         offspring = algorithms.varOr(population, toolbox, lambda_, cxpb, mutpb)
 
         # Evaluate the individuals with an invalid fitness
-        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        invalid_ind = []
+        for ind in offspring:
+            if not ind.fitness.valid:
+                ind.GAN.offspring = 1
+                invalid_ind.append(ind)
+
+
         fitnesses = toolbox.map(toolbox.evaluate, invalid_ind)
         for ind, fit in zip(invalid_ind, fitnesses):
             ind.fitness.values = fit
