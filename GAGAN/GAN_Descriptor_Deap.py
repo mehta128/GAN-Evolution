@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import tensorflow as tf
 import numpy as np
 import random
 import time
@@ -11,11 +10,12 @@ from deap import base
 from deap import creator
 from deap import tools
 import copy
-from gan_class import GAN, GANDescriptor
+from gan_class import GAN, GANDescriptor,Discriminator,Generator
 import os
 import matplotlib.pyplot as plt
 import copy
 import torch
+import torch.nn as nn
 import torch.nn.parallel
 import torch.utils.data
 import torchvision.datasets as dset
@@ -23,9 +23,9 @@ import torchvision.transforms as transforms
 from numpy.random import randint
 import itertools
 from metrics.fid import fid_score
-from util import tools
 from metrics import generative_score
-
+from util.ConvLayer import Conv2dSame
+from genetic_evolution import gaMuPlusLambda
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
@@ -36,9 +36,9 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 class MyContainer(object):
     # This class does not require the fitness attribute
     # it will be  added later by the creator
-    def __init__(self, thegan_descriptor):
+    def __init__(self, GAN):
         # Some initialisation with received values
-        self.gan_descriptor = thegan_descriptor
+        self.GAN = GAN
 
 
 # ####################################################################################################
@@ -52,21 +52,20 @@ def eval_gan_fid(individual):
 
 
     start_time = time.time()
-    my_gan_descriptor = individual.gan_descriptor
-    my_gan = GAN(my_gan_descriptor)
+    my_gan = individual.GAN
+    # Train the GAN network before evaluating
     my_gan.train_gan()
     elapsed_time = time.time() - start_time
+    fid_score = my_gan.getFIDScore()
+    torch.cuda.empty_cache()
 
-    # We reset the network since we do not need to keep the results of the training
-    # Also due to problems with deepcopy for tensorflow
-    fid_score = my_gan.getFIDScore()[0]
     All_Evals = All_Evals+1
 
     print("Eval:",  All_Evals, " Fitness:",  fid_score, " Time:", elapsed_time)
-
     if fid_score < best_val:
         best_val = fid_score
 
+    # Todo store data for geneting results 1. Graph for fid score and 2. Time for pareto set with gan individual
         #MAKE A GRAPH OF FID SCORE OVER GENERATIONS
 
         # fig = plt.figure(figsize=(5,5))
@@ -104,37 +103,27 @@ def init_individual(ind_class):
                                ]))
     # Create the dataloader
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=64,
-                                             shuffle=True, num_workers=2)
+                                             shuffle=True, num_workers=4)
 
     input_channel = 1
     output_dim = 64
-    lrate = 0.0002
+    lrate = 0.001
     lossfunction = randint(0,5)
-    epochs = 20
+
     my_gan_descriptor = GANDescriptor(input_channel, output_dim, lossfunction, lrate, dataloader, epochs)
 
-    g_layer = np.random.randint(5,11) # Number of layers
+    g_layer = np.random.randint(5,max_layer) # Number of layers
     g_activations = [randint(0, 3) for x in range(g_layer - 1)]
 
-    gchannels = {5: [512, 256, 128, 64, 64],
-                 6: [512, 512, 256, 128, 64, 64],
-                 7: [512, 512, 256, 256, 128, 64, 64],
-                 8: [512, 512, 256, 256, 128, 128, 64, 64],
-                 9: [512, 512, 256, 256, 128, 128, 64, 64, 64],
-                 10: [512, 512, 512, 256, 256, 128, 128, 64, 64, 64]}
+
     g_opChannels = gchannels[g_layer]
 
     g_weight_init = 0
     g_loop = 1
-    d_layer = np.random.randint(5,11) # Number of layers
+    d_layer = np.random.randint(5,max_layer) # Number of layers
     d_weight_init = 0
     d_activations = [randint(0, 3) for x in range(d_layer - 1)]
-    dchannels = {5: [64, 128, 256, 512, 512],
-                 6: [64, 64, 128, 256, 512, 512],
-                 7: [64, 64, 128, 128, 256, 512, 512],
-                 8: [64, 64, 128, 128, 256, 256, 512, 512],
-                 9: [64, 64, 128, 128, 256, 256, 512, 512, 512],
-                 10: [64, 64, 64, 128, 128, 256, 256, 512, 512, 512]}
+
     d_opChannels = dchannels[d_layer]
     d_loop = 1
 
@@ -142,9 +131,8 @@ def init_individual(ind_class):
                                                    g_weight_init, g_activations, g_loop)
     my_gan_descriptor.gan_discriminator_initialization(d_layer, input_channel, output_dim, d_opChannels,
                                                        d_weight_init, d_activations, d_loop)
-
-    ind = ind_class(my_gan_descriptor)
-
+    my_gan = GAN(my_gan_descriptor)
+    ind = ind_class(my_gan)
     return ind
 
 #####################################################################################################
@@ -154,11 +142,14 @@ def cx_gan(ind1, ind2):
     """Crossover between two GANs
        The networks of the two GANs are exchanged
     """
-    off1 = copy.deepcopy(ind1)
-    off1.gan_descriptor.Disc_network = copy.deepcopy(ind2.gan_descriptor.Disc_network)
-    ind2.gan_descriptor.Gen_network = copy.deepcopy(ind1.gan_descriptor.Gen_network)
 
-    ind1 = off1
+    off1 = copy.deepcopy(ind1.GAN)
+
+    off1.Disc_network = copy.deepcopy(ind2.GAN.Disc_network)
+
+    ind2.GAN.Gen_network = copy.deepcopy(ind1.GAN.Gen_network)
+
+    ind1.GAN = off1
 
     return ind1, ind2
 
@@ -172,53 +163,144 @@ def mut_gan(individual):
     Each time a network is mutated, only one mutation operator is applied
     """
 
-    my_gan_descriptor = individual.gan_descriptor
-    if random.random() < 0.5:                   # Discriminator will be mutated
+    gan = individual.GAN
+    my_gan_descriptor = gan.descriptor
+    updateNetwork = False
+
+    if np.random.uniform(0,1) < 0.6:                   # Discriminator will be mutated
+
         aux_network = my_gan_descriptor.Disc_network
+        update_net= 'D'
+        aux_network_model = gan.Disc_network
     else:                                       # Generator network will be mutated
         aux_network = my_gan_descriptor.Gen_network
+        update_net = 'G'
+        aux_network_model = gan.Gen_network
 
-    if aux_network.number_hidden_layers < nlayers:
+    # Decide the type of the mutation
+    if aux_network.number_layers >=5 and aux_network.number_layers < max_layer-2:
         type_mutation = mutation_types[np.random.randint(len(mutation_types))]
-
     else:
-        type_mutation = mutation_types[np.random.randint(1, len(mutation_types))]
+        type_mutation = mutation_types[np.random.randint(2, len(mutation_types))]
 
-    if type_mutation == "network_loops":       # The number of loops for the network learning is changed
-        aux_network.number_loop_train = np.random.randint(nloops)+1
+     # Todo add D-G loop mutations
+    # if type_mutation == "network_loops":       # The number of loops for the network learning is changed
+    #     aux_network.number_loop_train = np.random.randint(nloops)+1
+    # elif type_mutation == "weigt_init":             # We change weight initialization function in all layers
+    #     init_w_function = init_functions[np.random.randint(len(init_functions))]
+    #     aux_network.change_all_weight_init_fns(init_w_function)
+    # elif type_mutation == "dimension":              # We change the number of neurons in layer
+    #     aux_network.change_dimensions_in_random_layer(max_layer_size)
+    # elif type_mutation == "latent":             # We change the divergence measure used by the GAN
+    #     latent_distribution = lat_functions[np.random.randint(len(lat_functions))]
+    #     my_gan_descriptor.latent_distribution_function = latent_distribution
+    #
+    # elif type_mutation == "lrate":
+    #     my_gan_descriptor.lrate = np.random.choice(lrates)
+    if type_mutation == "add_layer":             # We add one layer
+        aux_network.number_layers += 1
+        if aux_network.number_layers < 10:
+            # Index where the new layer is added to maintain the convolution operation
+            pos = {6: 1, 7: 3, 8: 5, 9: 7, 10: 2}
+            if(update_net == 'D'):
+                aux_network.list_ouput_channels = dchannels[aux_network.number_layers]
 
-    elif type_mutation == "add_layer":             # We add one layer
-        layer_pos = np.random.randint(aux_network.number_hidden_layers)+1
-        lay_dims = np.random.randint(max_layer_size)+1
-        init_w_function = init_functions[np.random.randint(len(init_functions))]
-        init_a_function = act_functions[np.random.randint(len(act_functions))]
-        aux_network.network_add_layer(layer_pos, lay_dims, init_w_function, init_a_function)
+                add_from = {5: 2, 6: 8, 7: 14, 8: 20, 9: 5}
+
+                aux_network.list_ouput_channels = dchannels[aux_network.number_layers]
+                channel = dchannels[aux_network.number_layers][pos[aux_network.number_layers]]
+                list_of_layers = list(aux_network_model.main.children())
+                new_layer = [Conv2dSame(channel,channel, (4, 4), 1),nn.BatchNorm2d(channel)]
+                activation_val = randint(0, 3)
+                if activation_val == 0:
+                    new_layer += [nn.LeakyReLU(0.2)]
+                elif activation_val == 1:
+                    new_layer += [nn.ReLU(inplace=True)]
+                elif activation_val == 2:
+                    new_layer += [nn.ELU(inplace=True)]
+
+                list_of_layers = list_of_layers[:add_from[(aux_network.number_layers - 1)]] + new_layer + list_of_layers[add_from[(aux_network.number_layers - 1)]:]
+                aux_network_model.main = nn.Sequential(*list_of_layers)
+                aux_network.list_act_functions.insert(pos[aux_network.number_layers], activation_val)
+
+
+            if(update_net == 'G'):
+                # Index where the new layer is added to maintain the convolution operation
+                pos = {6:1,7:3,8:5,9:7,10:2}
+                add_from = {5: 3, 6: 9, 7: 15, 8: 21, 9: 6}
+
+                aux_network.list_ouput_channels = gchannels[aux_network.number_layers]
+                list_of_layers = list(aux_network_model.main.children())
+                channel = gchannels[aux_network.number_layers][pos[aux_network.number_layers]]
+
+                new_layer = [nn.ConvTranspose2d(channel, channel, 3, 1, 1, bias=False),
+                             nn.BatchNorm2d(channel)]
+                activation_val = randint(0,3)
+                if activation_val == 0:
+                    new_layer += [nn.LeakyReLU(0.2)]
+                elif activation_val == 1:
+                    new_layer += [nn.ReLU(inplace=True)]
+                elif activation_val == 2:
+                    new_layer += [nn.ELU(inplace=True)]
+
+                list_of_layers = list_of_layers[:add_from[(aux_network.number_layers-1)]] + new_layer + list_of_layers[add_from[(aux_network.number_layers-1)]:]
+                aux_network_model.main = nn.Sequential(*list_of_layers)
+
+                aux_network.list_act_functions.insert(pos[aux_network.number_layers],activation_val)
 
     elif type_mutation == "del_layer":              # We remove one layer
-        aux_network.network_remove_random_layer()
+        aux_network.number_layers -= 1
+        if(aux_network.number_layers >= 5):
+            #only delete the layer if the layer count is 6
 
-    elif type_mutation == "weigt_init":             # We change weight initialization function in all layers
-        init_w_function = init_functions[np.random.randint(len(init_functions))]
-        aux_network.change_all_weight_init_fns(init_w_function)
+            activation_pop = {5: 1, 6: 3, 7: 5, 8: 7, 9: 2}
+            if(update_net == 'G'):
+                # Because of conv operations, strides and kernel are fix so the removed index is also static
+                remove_from ={5:3,6:9,7:15,8:21,9:6}
+                aux_network.list_ouput_channels = gchannels[aux_network.number_layers]
 
-    elif type_mutation == "activation":             # We change the activation function in layer
-        layer_pos = np.random.randint(aux_network.number_hidden_layers)
-        init_a_function = act_functions[np.random.randint(len(act_functions))]
-        aux_network.change_activation_fn_in_layer(layer_pos, init_a_function)
 
-    elif type_mutation == "dimension":              # We change the number of neurons in layer
-        aux_network.change_dimensions_in_random_layer(max_layer_size)
+            if(update_net == 'D'):
+                remove_from = {5: 2, 6: 8, 7: 14, 8: 20, 9: 5}
+                aux_network.list_ouput_channels = dchannels[aux_network.number_layers]
 
-    elif type_mutation == "divergence":             # We change the divergence measure used by the GAN
-        fmeasure = divergence_measures[np.random.randint(len(divergence_measures))]
-        my_gan_descriptor.fmeasure = fmeasure
 
-    elif type_mutation == "latent":             # We change the divergence measure used by the GAN
-        latent_distribution = lat_functions[np.random.randint(len(lat_functions))]
-        my_gan_descriptor.latent_distribution_function = latent_distribution
+            # Delete the layers from the model
+            from_index = remove_from[aux_network.number_layers]
+            to_index = remove_from[aux_network.number_layers] + 3
+            list_of_layers = list(aux_network_model.main.children())
+            del list_of_layers[from_index:to_index]
+            aux_network_model.main = nn.Sequential(*list_of_layers)
+            # Remove the activation function from the array
+            aux_network.list_act_functions.pop(activation_pop[aux_network.number_layers])
 
-    elif type_mutation == "lrate":
-        my_gan_descriptor.lrate = np.random.choice(lrates)
+
+    elif type_mutation == "activation":             #
+
+        # We change the activation function in layer
+        layer_pos = randint(aux_network.number_layers-2)
+        aux_network.list_act_functions[layer_pos] = randint(0, 3)
+        # Calculate the index to be replaced for the selected layer
+        if (update_net == 'G'):
+            c = 2
+            for i in range(layer_pos):
+                c += 3
+        elif(update_net == 'D'):
+            c = 1
+            for i in range(layer_pos):
+                c += 3
+        if aux_network.list_act_functions[layer_pos] == 0:
+            aux_network_model.main[c] = nn.LeakyReLU(0.2)
+        elif aux_network.list_act_functions[layer_pos] == 1:
+            aux_network_model.main[c] = nn.ReLU(inplace=True)
+        elif aux_network.list_act_functions[layer_pos] == 2:
+            aux_network_model.main[c]  = nn.ELU(inplace=True)
+
+
+
+    elif type_mutation == "lossfunction":             # We change the divergence measure used by the GAN
+        fmeasure =randint(0, 5)
+        aux_network.lossfunction = fmeasure
 
     return individual,
 
@@ -262,9 +344,11 @@ def aplly_ga_gan(toolbox, pop_size=10, gen_number=50, cxpb=0.7, mutpb=0.3):
     """
           Application of the Genetic Algorithm
     """
-
+    hall_of_fame = 3
+    offspring_count = pop_size
     pop = toolbox.population(n=pop_size)
-    hall_of = tools.HallOfFame(pop_size)
+    global hall_of
+    hall_of = tools.HallOfFame(hall_of_fame)
     stats = tools.Statistics(lambda ind: ind.fitness.values)
 
     stats.register("avg", np.mean, axis=0)
@@ -272,94 +356,82 @@ def aplly_ga_gan(toolbox, pop_size=10, gen_number=50, cxpb=0.7, mutpb=0.3):
     stats.register("min", np.min, axis=0)
     stats.register("max", np.max, axis=0)
 
-    result, log_book = algorithms.eaMuPlusLambda(pop, toolbox, mu=pop_size, lambda_=pop_size, cxpb=cxpb, mutpb=mutpb,
+    result, log_book = gaMuPlusLambda(pop, toolbox, mu=pop_size, lambda_=offspring_count, cxpb=cxpb, mutpb=mutpb,
                                                  stats=stats, halloffame=hall_of, ngen=gen_number, verbose=1)
 
     return result, log_book, hall_of
 
 #####################################################################################################
 
-
-if __name__ == "__main__":  # Example python3 GAN_Descriptor_Deap.py 0 1000 10 1 30 10 5 50 10 2 0 10 0
-
+def printNetwork(obj):
+    print("layers :",obj.number_layers)
+    print("input dim :",obj.input_dim)
+    print("output dim  :",obj.output_dim)
+    print("op channels :",obj.list_ouput_channels)
+    print("loops :",obj.number_loop_train)
+    print("init functions :",obj.init_functions)
+    print("act functions :",obj.list_act_functions)
+    print("loss function :",obj.lossfunction)
+if __name__ == "__main__":
     #   main()
-    parser = argparse.ArgumentParser()
-    parser.add_argument('integers', metavar='int', type=int, choices=range(3000),
-                        nargs='+', help='an integer in the range 0..3000')
-    parser.add_argument('--sum', dest='accumulate', action='store_const', const=sum,
-                        default=max, help='sum the integers (default: find the max)')
-
-    # The parameters of the program are set or read from command line
+    import warnings
+    warnings.filterwarnings("ignore")
 
     global All_Evals
     global best_val
     global Eval_Records
     global test1
     global test2
+    global gchannels
+    global max_layer
+    global epochs
+    global dchannels
+
+    epochs = 1
+    max_layer = 8
+    ngen = 50                # Number of generations
+    npop = 7
+    SEL = 0                 # Selection method
+    CXp = 0.2          # Crossover probability (Mutation is 1-CXp)
+    Mxp = 1-CXp
+
+
+    gchannels = {5: [512, 256, 128, 64, 64],
+                 6: [512, 512, 256, 128, 64, 64],
+                 7: [512, 512, 256, 256, 128, 64, 64],
+                 8: [512, 512, 256, 256, 128, 128, 64, 64],
+                 9: [512, 512, 256, 256, 128, 128, 64, 64, 64],
+                 10: [512, 512, 512, 256, 256, 128, 128, 64, 64, 64]}
+
+
+    dchannels = {5: [64, 128, 256, 512, 512],
+                 6: [64, 64, 128, 256, 512, 512],
+                 7: [64, 64, 128, 128, 256, 512, 512],
+                 8: [64, 64, 128, 128, 256, 256, 512, 512],
+                 9: [64, 64, 128, 128, 256, 256, 512, 512, 512],
+                 10: [64, 64, 64, 128, 128, 256, 256, 512, 512, 512]}
 
     All_Evals = 0
     best_val = 10000
     Eval_Records = None
+           # SelecteWWd population size
+    tournsel_size = 4
 
-    args = parser.parse_args()
-    myseed = args.integers[0]               # Seed: Used to set different outcomes of the stochastic program
-    number_samples = args.integers[1]       # Number samples to generate by the GAN (number_samples=1000)
-    n = args.integers[2]                    # Number of Variables of the MO function (n=10)
-    Function = "F"+str(args.integers[3])    # MO function to optimize, all in F1...F9, except F6
-    z_dim = args.integers[4]                # Dimension of the latent variable  (z_dim=30)
-    nlayers = args.integers[5]              # Maximum number of layers for generator and discriminator (nlayers = 10)
-    nloops = args.integers[6]               # Maximum number of loops for training a network  (nloops = 5)
-    max_layer_size = args.integers[7]       # Maximum size of the layers  (max_layer_size = 50)
-    npop = args.integers[8]                 # Population size
-    ngen = args.integers[9]                 # Number of generations
-    SEL = args.integers[10]                 # Selection method
-    CXp = args.integers[11]*0.01            # Crossover probability (Mutation is 1-CXp)
-    nselpop = args.integers[12]             # Selected population size
-    if len(args.integers) > 13:
-        tournsel_size = args.integers[13]   # Tournament value
-    else:
-        tournsel_size = 4
-
-    All_Evals = 0                                     # Tracks the number of evaluations
-    best_val = 10000.0                                # Tracks best value among solutions
-
-    k = 1000                                          # Number of samples of the Pareto set for computing approximation (k=1000)
-    MOP_f = FFunctions(n, Function)                   # Creates a class containing details on MOP
-    ps_all_x = MOP_f.generate_ps_samples(k)           # Generates k points from the Pareto Set
-    test = MOP_f.generate_ps_samples(k)
-    pf1, pf2 = MOP_f.evaluate_mop_function(ps_all_x)  # Evaluate the points from the Pareto Set
-    test1, test2 = MOP_f.evaluate_mop_function(ps_all_x)
-    X_dim = n                                         # Number of variables to approximate
-
-    # List of activation functions the networks can use
-    act_functions = [None, tf.nn.relu, tf.nn.elu, tf.nn.softplus,
-                     tf.nn.softsign, tf.sigmoid, tf.nn.tanh]
-
-    # List of weight initialization functions the networks can use
-    init_functions = [xavier_init, tf.random_uniform, tf.random_normal]
-
-    #  List of latent distributions VAE can use
-    lat_functions = [np.random.uniform, np.random.normal]
-
-    #  List of divergence measures
-    divergence_measures = ["Total_Variation", "Standard_Divergence", "Forward_KL", "Reverse_KL", "Pearson_Chi_squared", "Least_squared"]
-    lrates = [0.00001]#[0.01, 0.005, 0.001, 0.0005, 0.0001, 0.00005]
     # Mutation types
-    mutation_types = ["add_layer", "network_loops", "del_layer", "weigt_init", "activation", "dimension", "divergence", "latent", "lrate"]
-
-    mb_size = 150           # Minibatch size
-    number_epochs = 1001    # Number epochs for training
-    print_cycle = 1001      # Frequency information is printed
-
+    mutation_types = ["add_layer", "del_layer", "activation", "lossfunction"]
     # GA initialization
     toolb = init_ga()
 
     # Runs the GA
-    res, logbook, hof = aplly_ga_gan(toolb, pop_size=npop, gen_number=ngen, cxpb=CXp, mutpb=1-CXp)
+    res, logbook, hof = aplly_ga_gan(toolb, pop_size=npop, gen_number=ngen, cxpb=CXp, mutpb=Mxp)
 
-    # Save the configurations of all networks evaluated
-    fname = "GAN_Evals_"+str(myseed)+"_"+Function+"_N_"+str(npop)+"_ngen_"+str(ngen)+"_Sel_"+str(SEL)+"_X_" + str(X_dim)
-    np.save(fname, Eval_Records)
+    print("########### BEST NETWORK  #########################")
+    print("Fitness :",hof.items[0].fitness)
+    print("Discriminator :")
+    printNetwork(hof.items[0].GAN.descriptor.Disc_network)
 
-    # Examples of how to call the function
-    # ./GAN_Descriptor_Deap.py 111 1000 10 1 30 10 5 50 20 1000 0 20 10 5
+    print("Generator :")
+    printNetwork(hof.items[0].GAN.descriptor.Gen_network)
+
+    print("############# LOG BOOK ################")
+    print(logbook)

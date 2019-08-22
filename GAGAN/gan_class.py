@@ -16,11 +16,14 @@ from util.ConvLayer import Conv2dSame
 from metrics.fid import fid_score
 from util import tools
 from metrics import generative_score
+import torch.cuda as cutorch
+
 
 ###############################################################################################################################
 # ########################################################## Network Descriptor #######################################################################################################################################################################################
 
-
+base_fid_statistics = None
+inception_model = None
 class NetworkDescriptor:
     def __init__(self, number_layers=1, input_dim=1, output_dim=1,  list_ouput_channels=None, init_functions=1, list_act_functions=None, number_loop_train=1,lossfunction=0):
         self.number_layers = number_layers
@@ -54,78 +57,6 @@ class NetworkDescriptor:
         self.list_act_functions = copy.deepcopy(other_network.list_act_functions)
         self.nz = 100
 
-    def network_add_layer(self, layer_pos, output_dims, init_a_function):
-        """
-        Function: network_add_layer()
-        Adds a layer at a specified position, with a given  number of output channel, activation function.
-        If the layer is inserted in layer_pos \in [0,number_hidden_layers] then all the
-        other layers are shifted.
-        If the layer is inserted in position number_hidden_layers+1, then it is just appended
-        to previous layer and it will output output_dim variables.
-        If the position for the layer to be added is not within feasible bounds
-        in the current architecture, the function silently returns
-        """
-
-        # If not within feasible bounds, return
-        if layer_pos < 0 or layer_pos >= self.number_layers:
-            return
-
-        # We create the new layer and add it to the network descriptor
-        self.list_ouput_channels.insert(layer_pos, output_dims)
-        self.list_act_functions.insert(layer_pos, init_a_function)
-
-        # Finally the number of hidden layers is updated
-        self.number_layers = self.number_layers + 1
-
-    def network_remove_layer(self, layer_pos):
-        """
-        Function: network_remove_layer()
-        Adds a layer at a specified position, with a given  number of units, init weight
-        function, activation function.
-        If the layer is inserted in layer_pos \in [0,number_hidden_layers] then all the
-        other layers are shifted.
-        If the layer is inserted in position number_hidden_layers+1, then it is just appended
-        to previous layer and it will output output_dim variables.
-        If the position for the layer to be added is not within feasible bounds
-        in the current architecture, the function silently returns
-        """
-
-        # If not within feasible bounds, return
-        if layer_pos <= 1 or layer_pos > self.number_layers:
-            return
-
-        # We set the number of input and output dimensions for the layer to be
-        # added and for the ones in the architecture that will be connected to it
-
-        # We delete the layer in pos layer_pos
-        self.list_ouput_channels.pop(layer_pos)
-        self.list_act_functions.pop(layer_pos)
-
-        # Finally the number of hidden layers is updated
-        self.number_layers = self.number_layers - 1
-
-    def network_remove_random_layer(self):
-        layer_pos = np.random.randint(self.number_layers)
-        self.network_remove_layer(layer_pos)
-
-    def change_activation_fn_in_layer(self, layer_pos, new_act_fn):
-        # If not within feasible bounds, return
-        if layer_pos < 0 or layer_pos > self.number_layers:
-            return
-        self.list_act_functions[layer_pos] = new_act_fn
-
-    def change_dimensions_in_layer(self, layer_pos, new_dim):
-        # If not within feasible bounds, return
-        if layer_pos < 0 or layer_pos > self.number_layers:
-            return
-        # If the dimension of the layer is identical to the existing one, return
-        self.list_ouput_channels[layer_pos] = new_dim
-
-    def change_dimensions_in_random_layer(self, max_layer_size):
-        layer_pos = np.random.randint(self.number_layers)
-        new_dim = np.random.randint(max_layer_size)+1
-        self.change_dimensions_in_layer(layer_pos, new_dim)
-
 
 ###############################################################################################################################
 # ########################################################## GAN Descriptor  #######################################################################################################################################################################################
@@ -141,6 +72,8 @@ class GANDescriptor:
         self.lrate = lrate
         self.dataloader = dataloader
         self.epochs = epochs
+        # TO recreate the model incase of specific mutation types
+
     def copy_from_other(self, other):
         self.input_dim = other.input_dim
         self.output_dim = other.output_dim
@@ -225,7 +158,6 @@ class Generator(nn.Module):
 class Discriminator(nn.Module):
     def __init__(self, d_descriptor):
         super(Discriminator, self).__init__()
-
         self.activationD = d_descriptor.list_act_functions
 
         self.nolayers = d_descriptor.number_layers
@@ -284,10 +216,15 @@ class GAN:
         self.device = torch.device("cuda:0" if (torch.cuda.is_available() and ngpu > 0) else "cpu")
         self.descriptor = gan_descriptor
         self.loss_function = self.descriptor.lossfunction
-        self.Disc_network = Discriminator(self.descriptor.Disc_network).to(self.device)
-        self.Gen_network = Generator(self.descriptor.Gen_network).to(self.device)
+        self.Disc_network = Discriminator(self.descriptor.Disc_network)
+        self.init_d_model = True
+        self.Gen_network = Generator(self.descriptor.Gen_network)
+        self.init_g_model = True
         self.dataloader =self.descriptor.dataloader
+        # DL is now with GAN class no need to keep it with descriptor- can also make one common data loader
+        self.descriptor.dataloader = None
         self.epochs = self.descriptor.epochs
+
     def reset_network(self):
         self.Gen_network.reset_network()
         self.Disc_network.reset_network()
@@ -305,16 +242,19 @@ class GAN:
 
     def getFIDScore(self):
 
-
-        #INIT INCEPTION MODEL ONLY ONCE(!)
+        self.Gen_network = self.Gen_network.to(self.device)
+        self.Gen_network.eval()
+        noise = torch.randn(1000, 100, 1, 1, device=self.device)
+        generated_images = self.Gen_network(noise).detach()
+        self.Gen_network.zero_grad()
+        self.Gen_network.cpu()
+        torch.cuda.empty_cache()
 
         # Get FID score for the model:
-        base_fid_statistics, inception_model = generative_score.initialize_fid(self.dataloader, sample_size=1000)
+        global base_fid_statistics,inception_model
+        if(base_fid_statistics is None and inception_model is None):
+            base_fid_statistics, inception_model = generative_score.initialize_fid(self.dataloader, sample_size=1000)
 
-        noise = torch.randn(1000, 100, 1, 1, device=self.device)
-
-        self.Gen_network.eval()
-        generated_images = self.Gen_network(noise).detach()
         inception_model = tools.cuda(inception_model)
         m1, s1 = fid_score.calculate_activation_statistics(
             generated_images.data.cpu().numpy(), inception_model, cuda=tools.is_cuda_available(),
@@ -322,11 +262,11 @@ class GAN:
         inception_model.cpu()
         m2, s2 = base_fid_statistics
         ret = fid_score.calculate_frechet_distance(m1, s1, m2, s2)
-        self.Gen_network.zero_grad()
+        torch.cuda.empty_cache()
         return ret
 
     def train_gan(self):
-
+        torch.cuda.empty_cache()
         ##########
         # Constants for training
         ############
@@ -335,36 +275,36 @@ class GAN:
         beta1 = 0.5
         # Set random seem for reproducibility
         manualSeed = 999
+        b_size = 64
         # manualSeed = random.randint(1, 10000) # use if you want new results
-        print("Random Seed: ", manualSeed)
+        # print("Random Seed: ", manualSeed)
         random.seed(manualSeed)
         torch.manual_seed(manualSeed)
 
+        self.Gen_network = tools.cuda(self.Gen_network)
+        self.Disc_network = tools.cuda(self.Disc_network)
+        if(self.init_g_model):
+            self.Gen_network.apply(self.weights_init)
+            self.optimizerG = optim.Adam(self.Gen_network.parameters(), lr=self.descriptor.lrate, betas=(beta1, 0.999))
+            self.init_g_model = False
+        if(self.init_d_model):
+            self.Disc_network.apply(self.weights_init)
+            self.optimizerD = optim.Adam(self.Disc_network.parameters(), lr=self.descriptor.lrate, betas=(beta1, 0.999))
+            self.init_d_model = False
 
-        #######################
-        # ADD DIFFERENT WEIGHTS INIT
-        self.Gen_network.apply(self.weights_init)
-
-        self.Disc_network.apply(self.weights_init)
-
-
-        # ADD DIFFERENT LOSS FUCNTIONS
+        # DIFFERENT LOSS FUCNTIONS
 
         if self.loss_function ==0:
             criterion = torch.nn.BCELoss()
         elif (self.loss_function == 2 or 3):
             BCE_stable = torch.nn.BCEWithLogitsLoss()
 
-        # Create batch of latent vectors that we will use to visualize
-        #  the progression of the generator
-        fixed_noise = torch.randn(64, nz, 1, 1, device=self.device)
+
         # Establish convention for real and fake labels during training
         real_label = 1
         fake_label = 0
-        # Setup Adam optimizers for both G and D
-        optimizerD = optim.Adam(self.Disc_network.parameters(), lr= self.descriptor.lrate, betas=(beta1, 0.999))
-        optimizerG = optim.Adam(self.Gen_network.parameters(), lr= self.descriptor.lrate, betas=(beta1, 0.999))
-
+        label = torch.full((b_size,), real_label, device=self.device)
+        f_label = torch.full((b_size,), fake_label, device=self.device)
         print("Starting Training Loop...")
         # Lists to keep track of progress
         img_list = []
@@ -388,9 +328,6 @@ class GAN:
                 # Format batch
                 real_cpu = data[0].to(self.device)
 
-                b_size = real_cpu.size(0)
-                label = torch.full((b_size,), real_label, device=self.device)
-                f_label = torch.full((b_size,), fake_label, device=self.device)
                 # Forward pass real batch through D
                 y_pred = self.Disc_network(real_cpu).view(-1)
 
@@ -431,34 +368,31 @@ class GAN:
                     errD = errD_real + errD_fake
                 elif self.loss_function ==2:
                     # RSGAN
-                    label = torch.full((b_size,), real_label, device=self.device)
                     errD = BCE_stable(y_pred - y_pred_fake, label)
                     errD.backward()
                 elif self.loss_function == 3:
                     #RAGAN
                     # Add the gradients from the all-real and all-fake batches
-                    y = torch.full((b_size,), real_label, device=self.device)
-                    y2 = torch.full((b_size,), fake_label, device=self.device)
-                    errD = (BCE_stable(y_pred - torch.mean(y_pred_fake), y) + BCE_stable(
-                        y_pred_fake - torch.mean(y_pred),y2)) / 2
+                    errD = (BCE_stable(y_pred - torch.mean(y_pred_fake), label) + BCE_stable(
+                        y_pred_fake - torch.mean(y_pred),f_label)) / 2
                     errD.backward()
                 elif self.loss_function == 4:
-                    errD_fake = torch.mean(torch.nn.ReLU()(1.0 + y_pred_fake))
+                    errD = torch.mean(torch.nn.ReLU()(1.0 + y_pred_fake))
                     # Calculate the gradients for this batch
-                    errD_fake.backward()
+                    errD.backward()
 
 
                 # Calculate the gradients for this batch
 
                 D_G_z1 = y_pred_fake.mean().item()
                 # Update D
-                optimizerD.step()
+                self.optimizerD.step()
 
                 ############################
                 # (2) Update G network: maximize log(D(G(z)))
                 ###########################
                 self.Gen_network.zero_grad()
-                label.fill_(real_label)  # fake labels are real for generator cost
+
                 # Since we just updated D, perform another forward pass of all-fake batch through D
                 y_pred_fake = self.Disc_network(fake).view(-1)
                 # Calculate G's loss based on this output
@@ -470,19 +404,13 @@ class GAN:
                     errG = torch.mean((y_pred_fake - label) ** 2)
                 elif self.loss_function == 2:
                     #RSGAN
-                    label = torch.full((b_size,), real_label, device=self.device)
                     y_pred = self.Disc_network(real_cpu).view(-1)
                     errG = BCE_stable(y_pred_fake - y_pred, label)
                 elif self.loss_function == 3:
                     #RAGAN
                     y_pred = self.Disc_network(real_cpu).view(-1)
-                    y = torch.full((b_size,), real_label, device=self.device)
-                    # Calculate G's loss based on this output
-                    # Non-saturating
-                    y2 = torch.full((b_size,), fake_label, device=self.device)
-                    errG = (BCE_stable(y_pred - torch.mean(y_pred_fake), y2) + BCE_stable(
-                        y_pred_fake - torch.mean(y_pred),y)) / 2
-                    # Calculate gradients for G
+                    errG = (BCE_stable(y_pred - torch.mean(y_pred_fake), f_label) + BCE_stable(
+                        y_pred_fake - torch.mean(y_pred),label)) / 2
                 elif self.loss_function == 4:
                     #Higen loss
                     errG = -torch.mean(y_pred_fake)
@@ -492,7 +420,7 @@ class GAN:
                 errG.backward()
                 D_G_z2 = y_pred_fake.mean().item()
                 # Update G
-                optimizerG.step()
+                self.optimizerG.step()
 
                 # Output training stats
                 if i % 10 == 0:
@@ -507,6 +435,9 @@ class GAN:
                 # Check how the generator is doing by saving G's output on fixed_noise
                 if (iters % 20 == 0) or ((epoch == self.epochs- 1) and (i == len(self.dataloader) - 1)):
                     with torch.no_grad():
+                        # Create batch of latent vectors that we will use to visualize
+                        #  the progression of the generator
+                        fixed_noise = torch.randn(64, nz, 1, 1, device=self.device)
                         fake = self.Gen_network(fixed_noise).detach().cpu()
                     img_list.append(vutils.make_grid(fake, padding=2, normalize=True))
 
@@ -529,8 +460,9 @@ class GAN:
 
                 iters += 1
 
-
-
+        self.Gen_network = self.Gen_network.cpu()
+        self.Disc_network = self.Disc_network.cpu()
+        torch.cuda.empty_cache()
 
 
 ###################################################################################################
@@ -557,15 +489,14 @@ def main():
 
     input_channel =1
     output_dim =64
-    lrate = 0.0002
-    lossfunction = 2
-    epochs = 20
+    lrate = 0.001
+    lossfunction = 0
+    epochs = 30
     my_gan_descriptor = GANDescriptor(input_channel, output_dim, lossfunction, lrate,dataloader,epochs)
 
     # g_layer = np.random.randint(2,11) # Number of hidden layers
     g_layer = 5
-    g_activations = [randint(0, 3) for x in range(g_layer - 1)]
-
+    g_activations = [1 for x in range(g_layer - 1)]
     gchannels={5: [512,256,128,64,64],
               6: [512,512,256,128,64,64],
               7: [512,512,256,256,128,64,64],
@@ -583,9 +514,9 @@ def main():
                                                        g_weight_init,g_activations,g_loop)
 
     # d_layer = np.random.randint(2,9) # Number of hidden layers
-    d_layer = 5
+    d_layer = 10
     d_weight_init = 0
-    d_activations = [randint(0, 3) for x in range(d_layer - 1)]
+    d_activations = [0 for x in range(d_layer - 1)]
     dchannels={5: [64,128,256,512,512],
               6: [64,64,128,256,512,512],
               7: [64,64,128,128,256,512,512],
@@ -600,9 +531,49 @@ def main():
 
     individual = GAN(my_gan_descriptor)
     print(individual.Gen_network)
-    print(individual.Disc_network)
+    # print(individual.Disc_network)
+    #
+    # print(individual.Gen_network.state_dict())
+    # individual.Gen_network.main = individual.Gen_network.main[:3]+individual.Gen_network.main[6:]
+    g_layer += 1
+    list_of_layers = list(individual.Gen_network.main.children())
+    pos = 1
+    new_layer = [nn.ConvTranspose2d(gchannels[g_layer][pos], gchannels[g_layer][pos], 3, 1, 1, bias=False),
+              nn.BatchNorm2d(128)]
+    new_layer += [nn.LeakyReLU(0.2)]
 
-    individual.train_gan()
+    list_of_layers = list_of_layers[:3]+new_layer+list_of_layers[3:]
+
+    print(list_of_layers)
+    # del list_of_layers[3:6]
+    individual.Gen_network.main = nn.Sequential(*list_of_layers)
+    #
+    # # print(individual.Gen_network.state_dict())
+    #
+    print(individual.Gen_network)
+    #
+    # layer_pos = randint(d_layer - 2)
+    # c = 1
+    # for i in range(layer_pos):
+    #     c += 3
+    #
+    #
+    # d_activations[layer_pos] = randint(0, 3)
+    #
+    #
+    # print("at layer pos :"+str(layer_pos+1)+" change activation :"+str(d_activations[layer_pos]))
+    #
+    # if d_activations[layer_pos] == 0:
+    #     individual.Disc_network.main[c] = nn.LeakyReLU(0.2)
+    # elif d_activations[layer_pos] == 1:
+    #     individual.Disc_network.main[c] = nn.ReLU(inplace=True)
+    # elif d_activations[layer_pos] == 2:
+    #     individual.Disc_network.main[c] = nn.ELU(inplace=True)
+    #
+    # print(individual.Disc_network)
+    # individual.train_gan()
+    # print(individual.getFIDScore())
+
 if __name__ == '__main__':
     # freeze_support() here if program needs to be frozen
     main()  # exec
