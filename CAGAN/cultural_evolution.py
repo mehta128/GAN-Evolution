@@ -78,6 +78,8 @@ def updateNormativeKnowledge(normative_knw,elites):
     if (fitness < normative_knw['dactivation'][2]):
         normative_knw['dactivation'][0] = minelite.GAN.descriptor.Disc_network.list_act_functions
         normative_knw['dactivation'][2] = fitness
+
+
     # Set upperbound
     maxelite = elites[2]
     fitness = maxelite.fitness.values[0]
@@ -117,7 +119,8 @@ def gaMuPlusLambda(population, toolbox, mu, lambda_, cxpb, mutpb, ngen,
     # BELIEF INIT
     belief_space = init_beliefspace()
     # Sort the population and take top 3 elites
-    population.sort(key=lambda ind: ind.fitness)
+
+    population.sort(key=lambda ind: ind.fitness.values)
     elites = population[:3]
     updateNormativeKnowledge(belief_space["normative"],elites)
 
@@ -149,7 +152,7 @@ def gaMuPlusLambda(population, toolbox, mu, lambda_, cxpb, mutpb, ngen,
         # Update normative knowledge using elite individuals
         # set min and max for G,D - layers,set activations array, set output channels array and loss function
         # Use normative knowledge to guide the mutational adjustment
-        population.sort(key=lambda ind: ind.fitness)
+        population.sort(key=lambda ind: ind.fitness.values)
         elites = population[:3]
         updateNormativeKnowledge(belief_space["normative"], elites)
 
@@ -231,7 +234,7 @@ def varOr(population, toolbox, lambda_,halloffame,belief_space, cxpb, mutpb):
             ind1,ind2= list(map(toolbox.clone, random.sample(population, 2)))
 
             # Add crossover with hall of fame - situational influence
-            if np.random.uniform(0,1) < 0.6:
+            if np.random.uniform(0,1) < 0.2:
                 ind2 = toolbox.clone(halloffame.items[0])
             ind1, ind2 = toolbox.mate(ind1, ind2)
             del ind1.fitness.values

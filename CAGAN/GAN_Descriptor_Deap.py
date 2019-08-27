@@ -93,7 +93,7 @@ def eval_gan_fid(individual):
 
         # my_gan_descriptor.print_components()
 
-    return fid_score, elapsed_time
+    return fid_score,
 
 #####################################################################################################
 def inc_individual():
@@ -284,16 +284,20 @@ def mut_gan(individual,belief_space):
             c = 2
             for i in range(layer_pos):
                 c += 3
+            mutated = False
             # Influence generator activations from belief space
-            if(layer_pos < len(belief_space['normative']['gactivation'][0])):
+            if((layer_pos < len(belief_space['normative']['gactivation'][0])) and not mutated):
                 # Lower Bound
                 if (x < belief_space['normative']['gactivation'][0][layer_pos]):
                     x = belief_space['normative']['gactivation'][0][layer_pos]
-            elif (layer_pos < len(belief_space['normative']['gactivation'][1])):
+                    mutated = True
+            if ((layer_pos < len(belief_space['normative']['gactivation'][1])) and not mutated):
                 # Upper Bound
                 if(x > belief_space['normative']['gactivation'][1][layer_pos]):
                     x = belief_space['normative']['gactivation'][1][layer_pos]
-            else:
+                    mutated = True
+
+            if(not mutated):
                 if(np.random.uniform(0,1) < 0.2):
                     # Influence from domain knowledge
                     x = belief_space['domain']['gactivation']
@@ -305,17 +309,19 @@ def mut_gan(individual,belief_space):
             c = 1
             for i in range(layer_pos):
                 c += 3
-
+            mutated = False
                 # Influence discriminator activations from belief space
-            if (layer_pos < len(belief_space['normative']['dactivation'][0])):
+            if ((layer_pos < len(belief_space['normative']['dactivation'][0])) and not mutated):
                 # Lower Bound
                 if (x < belief_space['normative']['dactivation'][0][layer_pos]):
                     x = belief_space['normative']['dactivation'][0][layer_pos]
-            elif (layer_pos < len(belief_space['normative']['dactivation'][1])):
+                    mutated = True
+            if ((layer_pos < len(belief_space['normative']['dactivation'][1])) and not mutated):
                 # Upper Bound
                 if (x > belief_space['normative']['dactivation'][1][layer_pos]):
                     x = belief_space['normative']['dactivation'][1][layer_pos]
-            else:
+                    mutated = True
+            if(not mutated):
                 if (np.random.uniform(0, 1) < 0.2):
                     # Influence from domain knowledge
                     x = belief_space['domain']['dactivation']
@@ -338,12 +344,15 @@ def mut_gan(individual,belief_space):
 
         fmeasure  = my_gan_descriptor.lossfunction
         # Influence from normative knowledge
+        mutated = False
         if(np.random.uniform(0,1) <0.90):
             if(fmeasure < belief_space['normative']['loss'][0]):
                 fmeasure = belief_space['normative']['loss'][0]
+                mutated = True
             elif(fmeasure > belief_space['normative']['loss'][1]):
                 fmeasure = belief_space['normative']['loss'][1]
-        else:
+                mutated = True
+        if(not mutated):
             # Use domain knowledge
             fmeasure = belief_space['domain']['loss']
 
@@ -456,11 +465,11 @@ if __name__ == "__main__":
                  10: [64, 64, 64, 128, 128, 256, 256, 512, 512, 512]}
 
     dataroot = "mnist_png/training"
-    epochs = 1 # 20 iter per epochs- 64*20 = 1028 samples
+    epochs = 1 # 20 iter per epochs- 64*20 = 1280 samples
     max_layer = 8
     ngen = 50                # Number of generations
     npop = 7
-    SEL = 0                 # Selection method
+    SEL = 1                 # Selection method
     CXp = 0.1         # Crossover prob ability (Mutation is 1-CXp)
     Mxp = 1-CXp
     path = 'C:/Users/RACHIT/Desktop/CAGAN/'
@@ -469,7 +478,7 @@ if __name__ == "__main__":
     best_val = 10000
     Eval_Records = None
            # SelecteWWd population size
-    tournsel_size = 4
+    tournsel_size = 3
 
     # Mutation types
     mutation_types = ["add_layer", "del_layer", "activation", "lossfunction"]
