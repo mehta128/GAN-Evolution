@@ -1,1 +1,2 @@
-# GAN_Evolution# GA-GAN-Evolution
+# Official implementation of Culturally Evolved GANs for Generating Fake Stroke Faces
+
